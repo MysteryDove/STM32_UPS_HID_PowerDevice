@@ -1,3 +1,18 @@
+/**
+ * @file uart_engine.c
+ * @brief Non-blocking UART request/response engine.
+ *
+ * Implements a cooperative state machine around the UART2_* adapter functions
+ * (DMA TX + buffered RX). Requests are queued and executed sequentially; each
+ * request can optionally be retried on failure.
+ *
+ * A periodic heartbeat can be configured via uart_engine_set_heartbeat() to
+ * monitor link/UPS health and trigger a conservative "battery unknown" state
+ * after repeated failures.
+ *
+ * Call uart_engine_tick() frequently from the main loop.
+ */
+
 #include "uart_engine.h"
 
 #include "main.h"
@@ -185,6 +200,11 @@ static void on_job_final_failure(const uart_engine_job_t *job)
     }
 }
 
+/**
+ * @brief Initialize the UART engine runtime state.
+ *
+ * Resets the internal queue/state machine and enables the engine.
+ */
 void uart_engine_init(void)
 {
     s_q_head = 0U;
@@ -226,6 +246,14 @@ static void uart_engine_reset_internal(void)
     UART2_Unlock();
 }
 
+/**
+ * @brief Enable or disable the UART engine.
+ *
+ * When disabling, queued/active jobs are dropped, heartbeat scheduling is
+ * stopped, and the UART lock is released.
+ *
+ * @param enable true to enable, false to disable.
+ */
 void uart_engine_set_enabled(bool enable)
 {
     if (enable == s_enabled)
@@ -240,11 +268,20 @@ void uart_engine_set_enabled(bool enable)
     }
 }
 
+/**
+ * @brief Get whether the engine is enabled.
+ * @return true if enabled; false if disabled.
+ */
 bool uart_engine_is_enabled(void)
 {
     return s_enabled;
 }
 
+/**
+ * @brief Enqueue a UART request for execution by uart_engine_tick().
+ * @param req Request descriptor (command, expected length, timeout, callback).
+ * @return Result code indicating success or why the enqueue failed.
+ */
 uart_engine_result_t uart_engine_enqueue(const uart_engine_request_t *req)
 {
     if (!s_enabled)
@@ -271,6 +308,10 @@ uart_engine_result_t uart_engine_enqueue(const uart_engine_request_t *req)
     return UART_ENGINE_OK;
 }
 
+/**
+ * @brief Configure or disable the periodic heartbeat request.
+ * @param cfg Heartbeat configuration. Pass NULL to disable.
+ */
 void uart_engine_set_heartbeat(const uart_engine_heartbeat_cfg_t *cfg)
 {
     if (!s_enabled)
@@ -309,6 +350,11 @@ void uart_engine_set_heartbeat(const uart_engine_heartbeat_cfg_t *cfg)
     s_hb_queued_or_active = false;
 }
 
+/**
+ * @brief Helper process function that checks for an exact byte-for-byte match.
+ *
+ * user_ctx must point to a uart_engine_expect_bytes_t.
+ */
 bool uart_engine_process_expect_exact(const uint8_t *rx, uint16_t rx_len, void *out_value, void *user_ctx)
 {
     (void)out_value;
@@ -458,6 +504,12 @@ static void job_fail_and_maybe_retry(uint32_t now_ms)
     active_clear();
 }
 
+/**
+ * @brief Advance the UART engine state machine.
+ *
+ * Call frequently (e.g. each main loop iteration). This function is
+ * non-blocking and will return quickly.
+ */
 void uart_engine_tick(void)
 {
     if (!s_enabled)

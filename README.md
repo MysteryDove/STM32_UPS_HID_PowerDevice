@@ -65,6 +65,8 @@ Typical connections:
 
 - UART2 (TTL level): PA2 (TX), PA3 (RX)
 
+- UART1 (debug to get all print message with baudrate 115200): PA9
+
 - If your UPS is true RS-232 voltage levels, use a level shifter/transceiver (e.g. MAX3232).
 
   

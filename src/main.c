@@ -47,6 +47,7 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 PCD_HandleTypeDef hpcd_USB_FS;
@@ -57,6 +58,7 @@ PCD_HandleTypeDef hpcd_USB_FS;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USB_PCD_Init(void);
 /* USER CODE BEGIN PFP */
@@ -64,6 +66,154 @@ static void MX_USB_PCD_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+// Simple UART engine demo: send 'Y' and print the response.
+//
+// Notes:
+// - uart_engine requires a fixed expected_len. For 'Y', the UPS replies with
+//   2 data bytes + CRLF (0x0D 0x0A) => 4 bytes total.
+// - Printing uses printf(), which is retargeted to SWO/ITM by _write below.
+
+#ifndef UART_TEST_Y_ENABLED
+#define UART_TEST_Y_ENABLED 1
+#endif
+
+#ifndef UART_TEST_Y_PERIOD_MS
+#define UART_TEST_Y_PERIOD_MS 5000U
+#endif
+
+#ifndef UART_TEST_Y_EXPECTED_LEN
+#define UART_TEST_Y_EXPECTED_LEN 4U
+#endif
+
+#ifndef UART_TEST_Y_CMD_CRLF_COUNT
+#define UART_TEST_Y_CMD_CRLF_COUNT 0U
+#endif
+
+#ifndef UART_TEST_Y_RX_TIMEOUT_MS
+#define UART_TEST_Y_RX_TIMEOUT_MS 250U
+#endif
+
+typedef struct
+{
+    bool in_flight;
+    bool done;
+    uint32_t started_ms;
+    uint16_t len;
+    uint8_t buf[64];
+} uart_test_y_ctx_t;
+
+static uart_test_y_ctx_t s_uart_test_y;
+
+static bool uart_test_y_process(const uint8_t *rx, uint16_t rx_len, void *out_value, void *user_ctx)
+{
+    (void)out_value;
+
+    uart_test_y_ctx_t *ctx = (uart_test_y_ctx_t *)user_ctx;
+    if (ctx == NULL)
+    {
+        return false;
+    }
+
+    ctx->len = 0U;
+
+    if ((rx != NULL) && (rx_len != 0U))
+    {
+        uint16_t copy_len = rx_len;
+        if (copy_len > (uint16_t)sizeof(ctx->buf))
+        {
+            copy_len = (uint16_t)sizeof(ctx->buf);
+        }
+        (void)memcpy(ctx->buf, rx, copy_len);
+        ctx->len = copy_len;
+    }
+
+    // Drain any additional already-buffered bytes (non-blocking).
+    uint16_t avail = UART2_Available();
+    if (avail != 0U)
+    {
+        uint16_t cap = (uint16_t)(sizeof(ctx->buf) - ctx->len);
+        if (cap != 0U)
+        {
+            uint16_t want = avail;
+            if (want > cap)
+            {
+                want = cap;
+            }
+            ctx->len += UART2_Read(&ctx->buf[ctx->len], want);
+        }
+    }
+
+    ctx->done = true;
+    ctx->in_flight = false;
+    return true;
+}
+
+static void uart_engine_send_Y_and_print_task(void)
+{
+#if (UART_TEST_Y_ENABLED != 0)
+    if (!uart_engine_is_enabled())
+    {
+        return;
+    }
+
+    uint32_t const now_ms = HAL_GetTick();
+    static uint32_t next_send_ms = 0U;
+
+    // Detect a lost request (engine has no user-visible failure callback).
+    if (s_uart_test_y.in_flight)
+    {
+        // TX wait has its own timeout (UART_ENGINE_TX_TIMEOUT_MS). Add margin.
+        uint32_t const overall_timeout_ms = (uint32_t)UART_TEST_Y_RX_TIMEOUT_MS + 600U;
+        if ((now_ms - s_uart_test_y.started_ms) >= overall_timeout_ms)
+        {
+            s_uart_test_y.in_flight = false;
+            printf("UART 'Y' request timed out\r\n");
+        }
+    }
+
+    if (s_uart_test_y.done)
+    {
+        printf("UART 'Y' reply (%u bytes): ", (unsigned)s_uart_test_y.len);
+        for (uint16_t i = 0U; i < s_uart_test_y.len; i++)
+        {
+            printf("%02X ", (unsigned)s_uart_test_y.buf[i]);
+        }
+        printf("\r\n");
+
+        s_uart_test_y.done = false;
+        s_uart_test_y.len = 0U;
+    }
+
+    if (!s_uart_test_y.in_flight && ((int32_t)(now_ms - next_send_ms) >= 0))
+    {
+        uart_engine_request_t req = {
+            .out_value = NULL,
+            .cmd = (uint16_t)'Y',
+            .cmd_bits = 8U,
+            .crlf_count = (uint8_t)UART_TEST_Y_CMD_CRLF_COUNT,
+            .expected_len = (uint16_t)UART_TEST_Y_EXPECTED_LEN,
+            .timeout_ms = (uint32_t)UART_TEST_Y_RX_TIMEOUT_MS,
+            .max_retries = 0U,
+            .process_fn = uart_test_y_process,
+            .user_ctx = &s_uart_test_y,
+        };
+
+        uart_engine_result_t const r = uart_engine_enqueue(&req);
+        if (r == UART_ENGINE_OK)
+        {
+            s_uart_test_y.in_flight = true;
+            s_uart_test_y.started_ms = now_ms;
+        }
+        else
+        {
+            printf("UART 'Y' enqueue failed: %u\r\n", (unsigned)r);
+        }
+
+        next_send_ms = now_ms + (uint32_t)UART_TEST_Y_PERIOD_MS;
+    }
+#endif
+}
 
 // UART engine enable switch.
 // Set UART_ENGINE_DEFAULT_ENABLED to 0 to compile with UART polling disabled.
@@ -74,9 +224,9 @@ static void MX_USB_PCD_Init(void);
 static bool s_uart_engine_enabled = (UART_ENGINE_DEFAULT_ENABLED != 0);
 
 ups_present_status_t g_power_summary_present_status = {
-    .ac_present = false,
-    .charging = false,
-    .discharging = true,
+    .ac_present = true,
+    .charging = true,
+    .discharging = false,
     .fully_charged = false,
     .need_replacement = false,
     .below_remaining_capacity_limit = false,
@@ -110,7 +260,7 @@ ups_battery_t g_battery = {
     .remaining_time_limit_s = 300,
     .temperature = 250,
     .manufacturer_date = 0,
-    .remaining_capacity = 95,
+    .remaining_capacity = 20,
 };
 
 ups_input_t g_input = {
@@ -129,6 +279,11 @@ ups_output_t g_output = {
     .frequency = 5000,
 };
 
+#ifndef TEST_DECAY_REMAINING_CAPACITY_ENABLED
+#define TEST_DECAY_REMAINING_CAPACITY_ENABLED 0
+#endif
+
+#if (TEST_DECAY_REMAINING_CAPACITY_ENABLED != 0)
 static void test_decay_remaining_capacity(void)
 {
     static uint32_t last_ms = 0U;
@@ -154,8 +309,41 @@ static void test_decay_remaining_capacity(void)
     }
     g_battery.remaining_time_limit_s = g_battery.run_time_to_empty_s;
 }
+#endif
 
+static void test_increase_remaining_capacity(void)
+{
+    static uint32_t last_ms = 0U;
+    uint32_t const now_ms = HAL_GetTick();
 
+    if ((now_ms - last_ms) < 30000U)
+    {
+        return;
+    }
+
+    last_ms = now_ms;
+    if (g_battery.remaining_capacity < 100U)
+    {
+        g_battery.remaining_capacity++;
+
+    }
+    g_battery.remaining_time_limit_s = g_battery.run_time_to_empty_s;
+}
+
+int _write(int file, char *ptr, int len)
+{
+    (void)file;
+
+    if ((ptr == NULL) || (len <= 0))
+    {
+        return 0;
+    }
+
+    // Route stdout to USART1 so a separate USB-TTL adapter can be used as a monitor.
+    // Wiring (STM32F103): PA9=USART1_TX -> USB-TTL RX, GND shared.
+    (void)HAL_UART_Transmit(&huart1, (uint8_t *)ptr, (uint16_t)len, 200U);
+    return len;
+}
 /* USER CODE END 0 */
 
 /**
@@ -186,6 +374,7 @@ int main(void)
 
     /* Initialize all configured peripherals */
     MX_GPIO_Init();
+    MX_USART1_UART_Init();
     MX_USART2_UART_Init();
     MX_USB_PCD_Init();
 
@@ -215,8 +404,10 @@ int main(void)
         /* USER CODE BEGIN 3 */
 
         // // Quick test: decay remaining capacity every 30 seconds.
-        test_decay_remaining_capacity();
+        // test_decay_remaining_capacity();
+        // test_increase_remaining_capacity(); 
 
+        uart_engine_send_Y_and_print_task();
         uart_engine_tick();
         ups_hid_periodic_task();
     }
@@ -304,6 +495,27 @@ static void MX_USART2_UART_Init(void)
     /* USER CODE BEGIN USART2_Init 2 */
 
     /* USER CODE END USART2_Init 2 */
+}
+
+/**
+ * @brief USART1 Initialization Function (monitor/printf output)
+ * @param None
+ * @retval None
+ */
+static void MX_USART1_UART_Init(void)
+{
+    huart1.Instance = USART1;
+    huart1.Init.BaudRate = 115200;
+    huart1.Init.WordLength = UART_WORDLENGTH_8B;
+    huart1.Init.StopBits = UART_STOPBITS_1;
+    huart1.Init.Parity = UART_PARITY_NONE;
+    huart1.Init.Mode = UART_MODE_TX_RX;
+    huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+    huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+    if (HAL_UART_Init(&huart1) != HAL_OK)
+    {
+        Error_Handler();
+    }
 }
 
 /**
