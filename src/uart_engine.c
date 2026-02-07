@@ -117,7 +117,7 @@ static bool queue_pop(uart_engine_job_t *out)
     return true;
 }
 
-static uint16_t build_cmd_bytes(uint8_t *tx, uint16_t tx_cap, uint16_t cmd, uint8_t cmd_bits, uint8_t crlf_count)
+static uint16_t build_cmd_bytes(uint8_t *tx, uint16_t tx_cap, uint16_t cmd, uint8_t cmd_bits)
 {
     if ((tx == NULL) || (tx_cap == 0U))
     {
@@ -149,18 +149,81 @@ static uint16_t build_cmd_bytes(uint8_t *tx, uint16_t tx_cap, uint16_t cmd, uint
         return 0U;
     }
 
-    while (crlf_count > 0U)
+    return used;
+}
+
+static bool request_is_valid(const uart_engine_request_t *req)
+{
+    if (req == NULL)
     {
-        if ((used + 2U) > tx_cap)
-        {
-            return 0U;
-        }
-        tx[used++] = 0x0DU;
-        tx[used++] = 0x0AU;
-        crlf_count--;
+        return false;
     }
 
-    return used;
+    if ((req->cmd_bits != 8U) && (req->cmd_bits != 16U))
+    {
+        return false;
+    }
+
+    if (req->expected_len > UART_ENGINE_MAX_EXPECTED_LEN)
+    {
+        return false;
+    }
+
+    if (req->expected_ending)
+    {
+        if ((req->expected_ending_len == 0U) || (req->expected_ending_len > UART_ENGINE_MAX_ENDING_LEN))
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// Determine how many bytes the engine should read for the active request.
+// For fixed-length responses it returns the expected length; when an ending
+// sequence is tracked, it defaults to the configured max buffer size if no
+// explicit expected length was provided so the terminator detection still has
+// room to read.
+static uint16_t request_rx_cap(const uart_engine_request_t *req)
+{
+    if (req == NULL)
+    {
+        return 0U;
+    }
+
+    if (!req->expected_ending)
+    {
+        return req->expected_len;
+    }
+
+    if (req->expected_len == 0U)
+    {
+        return UART_ENGINE_MAX_EXPECTED_LEN;
+    }
+
+    return req->expected_len;
+}
+
+static bool rx_has_expected_ending(const uart_engine_request_t *req, const uint8_t *rx, uint16_t rx_len)
+{
+    if ((req == NULL) || !req->expected_ending)
+    {
+        return false;
+    }
+
+    uint8_t const ending_len = req->expected_ending_len;
+    if ((ending_len == 0U) || (ending_len > UART_ENGINE_MAX_ENDING_LEN) || (rx_len < ending_len))
+    {
+        return false;
+    }
+
+    if (rx == NULL)
+    {
+        return false;
+    }
+
+    return (memcmp(&rx[rx_len - ending_len], req->expected_ending_bytes, ending_len) == 0);
 }
 
 static void active_clear(void)
@@ -288,15 +351,7 @@ uart_engine_result_t uart_engine_enqueue(const uart_engine_request_t *req)
     {
         return UART_ENGINE_ERR_DISABLED;
     }
-    if (req == NULL)
-    {
-        return UART_ENGINE_ERR_BAD_PARAM;
-    }
-    if ((req->cmd_bits != 8U) && (req->cmd_bits != 16U))
-    {
-        return UART_ENGINE_ERR_BAD_PARAM;
-    }
-    if (req->expected_len > UART_ENGINE_MAX_EXPECTED_LEN)
+    if (!request_is_valid(req))
     {
         return UART_ENGINE_ERR_BAD_PARAM;
     }
@@ -327,13 +382,7 @@ void uart_engine_set_heartbeat(const uart_engine_heartbeat_cfg_t *cfg)
     }
 
     s_hb_cfg = *cfg;
-    if ((s_hb_cfg.req.cmd_bits != 8U) && (s_hb_cfg.req.cmd_bits != 16U))
-    {
-        s_hb_enabled = false;
-        return;
-    }
-
-    if (s_hb_cfg.req.expected_len > UART_ENGINE_MAX_EXPECTED_LEN)
+    if (!request_is_valid(&s_hb_cfg.req))
     {
         s_hb_enabled = false;
         return;
@@ -353,13 +402,12 @@ void uart_engine_set_heartbeat(const uart_engine_heartbeat_cfg_t *cfg)
 /**
  * @brief Helper process function that checks for an exact byte-for-byte match.
  *
- * user_ctx must point to a uart_engine_expect_bytes_t.
+ * out_value must point to a uart_engine_expect_bytes_t.
  */
-bool uart_engine_process_expect_exact(const uint8_t *rx, uint16_t rx_len, void *out_value, void *user_ctx)
+bool uart_engine_process_expect_exact(uint16_t cmd, const uint8_t *rx, uint16_t rx_len, void *out_value)
 {
-    (void)out_value;
-
-    const uart_engine_expect_bytes_t *exp = (const uart_engine_expect_bytes_t *)user_ctx;
+    (void)cmd;
+    const uart_engine_expect_bytes_t *exp = (const uart_engine_expect_bytes_t *)out_value;
     if ((exp == NULL) || (exp->expected == NULL))
     {
         return false;
@@ -413,8 +461,7 @@ static void maybe_enqueue_heartbeat(uint32_t now_ms)
 static void job_start_tx(uint32_t now_ms)
 {
     uint8_t tx_buf[8];
-    uint16_t tx_len = build_cmd_bytes(tx_buf, (uint16_t)sizeof(tx_buf), s_active.req.cmd, s_active.req.cmd_bits,
-                                      s_active.req.crlf_count);
+    uint16_t tx_len = build_cmd_bytes(tx_buf, (uint16_t)sizeof(tx_buf), s_active.req.cmd, s_active.req.cmd_bits);
     if (tx_len == 0U)
     {
         s_state = UART_ENGINE_STATE_IDLE;
@@ -576,19 +623,35 @@ void uart_engine_tick(void)
 
     case UART_ENGINE_STATE_RX_WAIT:
     {
-        if (s_active.req.expected_len == 0U)
+        uint16_t const rx_cap = request_rx_cap(&s_active.req);
+
+        if (rx_cap == 0U)
         {
             s_state = UART_ENGINE_STATE_PROCESS;
             break;
         }
 
-        if (s_rx_got < s_active.req.expected_len)
+        if (s_rx_got < rx_cap)
         {
-            uint16_t want = (uint16_t)(s_active.req.expected_len - s_rx_got);
+            uint16_t want = (uint16_t)(rx_cap - s_rx_got);
             s_rx_got += UART2_Read(&s_rx_buf[s_rx_got], want);
         }
 
-        if (s_rx_got >= s_active.req.expected_len)
+        if (s_active.req.expected_ending)
+        {
+            if (rx_has_expected_ending(&s_active.req, s_rx_buf, s_rx_got))
+            {
+                s_state = UART_ENGINE_STATE_PROCESS;
+                break;
+            }
+
+            if (s_rx_got >= rx_cap)
+            {
+                job_fail_and_maybe_retry(now_ms);
+                break;
+            }
+        }
+        else if (s_rx_got >= rx_cap)
         {
             s_state = UART_ENGINE_STATE_PROCESS;
             break;
@@ -606,7 +669,7 @@ void uart_engine_tick(void)
         bool ok = true;
         if (s_active.req.process_fn != NULL)
         {
-            ok = s_active.req.process_fn(s_rx_buf, s_active.req.expected_len, s_active.req.out_value, s_active.req.user_ctx);
+            ok = s_active.req.process_fn(s_active.req.cmd, s_rx_buf, s_rx_got, s_active.req.out_value);
         }
 
         UART2_Unlock();

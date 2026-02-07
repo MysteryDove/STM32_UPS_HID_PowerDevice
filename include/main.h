@@ -76,6 +76,31 @@ uint16_t UART2_Read(uint8_t *dst, uint16_t len);
 void UART2_DiscardBuffered(void);
 bool UART2_ReadExactTimeout(uint8_t *dst, uint16_t len, uint32_t timeout_ms);
 
+// Variable-length response support (terminator-based).
+//
+// Configure the terminator sequence that indicates end-of-message.
+// Defaults are CRLF (0x0D 0x0A).
+//
+// Example: to use LF only:
+//   g_uart2_rx_terminator[0] = 0x0A;
+//   g_uart2_rx_terminator_len = 1;
+extern uint8_t g_uart2_rx_terminator[2];
+extern uint8_t g_uart2_rx_terminator_len;
+
+// Read bytes until the terminator sequence is seen or timeout expires.
+// - On success returns true and sets *out_len to number of payload bytes (terminator removed)
+// - On timeout/overflow returns false; *out_len is still set to bytes captured so far
+bool UART2_ReadTerminatedTimeout(uint8_t *dst,
+                                uint16_t dst_cap,
+                                uint16_t *out_len,
+                                uint32_t timeout_ms);
+
+// Convenience for text lines: same as UART2_ReadTerminatedTimeout() but always
+// NUL-terminates dst (if dst_cap > 0).
+bool UART2_ReadLineTerminatedTimeout(char *dst,
+                                    uint16_t dst_cap,
+                                    uint32_t timeout_ms);
+
 bool UART2_TryLock(void);
 void UART2_Unlock(void);
 

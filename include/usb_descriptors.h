@@ -5,6 +5,9 @@
  extern "C" {
 #endif
 
+#include <stdbool.h>
+#include <stdint.h>
+
 #define TUD_HID_REPORT_DESC_UPS(...) \
   HID_USAGE_PAGE(HID_USAGE_PAGE_POWER), \
   HID_USAGE(HID_USAGE_POWER_UPS), \
@@ -398,6 +401,33 @@
     HID_FEATURE(HID_DATA | HID_VARIABLE | HID_ABSOLUTE | HID_VOLATILE), \
   HID_COLLECTION_END, \
 HID_COLLECTION_END \
+
+
+// ------------------------------------------------------------------
+// USB string descriptor accessors
+// ------------------------------------------------------------------
+
+typedef enum
+{
+  USB_STRID_LANGID = 0,
+  USB_STRID_MANUFACTURER = 1,
+  USB_STRID_PRODUCT = 2,
+  USB_STRID_SERIAL = 3,
+  USB_STRID_HID_INAME = 4,
+  USB_STRID_HID_DEVICE_CHEM = 5,
+} usb_string_id_t;
+
+// Returns the number of supported string descriptor indices.
+uint8_t usb_desc_string_count(void);
+
+// Returns an ASCII, null-terminated string for the given index.
+// Note: index 0 (LANGID) returns NULL.
+const char *usb_desc_get_string_ascii(uint8_t index);
+
+// Sets an ASCII string for the given index by copying it into internal storage.
+// Returns true on success.
+// Note: index 0 (LANGID) is not settable and returns false.
+bool usb_desc_set_string_ascii(uint8_t index, const char *str);
 
 
 #ifdef __cplusplus

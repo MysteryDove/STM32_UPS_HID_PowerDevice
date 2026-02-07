@@ -29,9 +29,11 @@ This project uses **TinyUSB** for the USB device stack and STM32Cube HAL for the
 
 - HID **GET_REPORT** callbacks for both **Input** and **Feature** reports
 
-- ~~A small **UART2 adapter** (DMA TX + interrupt RX ring buffer)~~ **WIP!!!**
+- A small **UART2 adapter** (DMA TX + interrupt RX ring buffer)
 
-- ~~A **non-blocking UART request engine** (queue + retries + optional heartbeat monitoring)~~ **WIP!!!**
+- A **non-blocking UART request engine** (queue + retries + optional heartbeat monitoring)
+
+- A protocol parser module for **SPM2K/APC-style serial responses** (`src/spm2k.c`) that provides LUT-based request definitions and value parsers
 
   
 
@@ -39,13 +41,15 @@ This project uses **TinyUSB** for the USB device stack and STM32Cube HAL for the
 
   
 
-Right now the firmware populates the exported UPS values from **static demo values** defined in `src/main.c`, plus an optional demo decay function. You can use it as a base and get whatever battery information and report to the pc. The values may have incorrect unit exponent so parsed value under linux might be ridiculous.
+Right now the firmware still runs a **UART demo polling task** in `src/main.c` (`'Y'` command example) and does not yet wire the full SPM2K LUT polling flow into the main loop.
+
+`src/spm2k.c` is no longer empty: it now contains command LUTs plus parsing callbacks for common UPS fields (voltage/current/frequency/load/runtime/temperature/status/date/string metadata), but scheduling those LUT entries is still up to your integration flow in `main.c`.
 
 To be noticed that for now it's developing towards NUT support for subdriver apchid, so some of the value might missing under linux simply because the subdriver from NUT is not using it. (Maybe developing a custom driver for nut can solve the problem? But I do not have time for now.)
 
-For Windows Support, system level warning is triggered by by `g_power_summary.warning_capacity_limit` and force shutdown triggered by `g_power_summary.remaining_capacity_limit`, no charging icon will show if there's no current under power summary.
+For Windows Support, system level warning is triggered by `g_power_summary.warning_capacity_limit` and force shutdown is triggered by `g_power_summary.remaining_capacity_limit`; no charging icon will show if there is no current under power summary.
 
-The UART engine is present and working as infrastructure, but the **UPS serial protocol parsing / polling is not yet implemented** (see `src/spm2k.c`).
+USB startup is now gated in `main.c` by `g_usb_init_enabled` (default `false`). On Blue Pill boards with a fixed D+ pull-up, firmware can hold PA12 low until USB start to avoid early host attach detection.
 
   
 
@@ -161,7 +165,13 @@ Non-blocking UART polling engine.
 
 - Provides a small queue of jobs (`uart_engine_enqueue()`)
 
-- Each job sends an 8-bit or 16-bit command (optional CRLF suffix), waits for an expected RX length, then calls a `process_fn` callback
+- Callback signature is `process_fn(cmd, rx, rx_len, out_value)` (no `user_ctx`)
+
+- Supports two RX completion modes:
+  - fixed-length mode (`expected_ending = false`): wait for `expected_len` bytes
+  - terminator mode (`expected_ending = true`): wait until `expected_ending_bytes[]` is received; `expected_len` is treated as max capture length
+
+- Command framing/suffix bytes (e.g. CRLF) are caller-side protocol concerns, not engine concerns
 
 - Handles retries and a short cooldown between retries
 
@@ -223,7 +233,13 @@ USB descriptor definitions for TinyUSB:
 
   
 
-This is where you change product strings (e.g. "SPM2K") and the VID/PID.
+This is where you change VID/PID and default USB strings.
+
+String descriptors are now backed by mutable buffers and can be read/updated at runtime via:
+
+- `usb_desc_string_count()`
+- `usb_desc_get_string_ascii(index)`
+- `usb_desc_set_string_ascii(index, str)`
 
   
 
@@ -231,19 +247,19 @@ This is where you change product strings (e.g. "SPM2K") and the VID/PID.
 
   
 
-Placeholder for the UPS serial protocol implementation.
+SPM2K/APC protocol request definitions and response parsers.
 
   
 
-At the moment this file is empty; the intent is for it to:
+This module now provides:
 
   
 
-- define the UPS query commands and parsing logic
+- LUTs for "constant" and "dynamic" UPS query sets (`g_spm2k_constant_lut`, `g_spm2k_dynamic_lut`)
 
-- schedule UART jobs via `uart_engine_enqueue()`
+- parsing helpers that validate ASCII/CSV/hex formats and write converted values into HID state fields
 
-- update the global UPS state (`g_battery`, `g_input`, `g_output`, `g_power_summary_*`) that feeds HID reporting
+- command-aware string parsing that can update USB product/serial strings via `usb_desc_set_string_ascii()`
 
   
 

@@ -67,11 +67,94 @@ static void MX_USB_PCD_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+// ---- USB init gate (simple) -----------------------------------------------
+// User-controlled variable: set true to initialize USB device stack.
+// Default is false: USB is not initialized at all.
+volatile bool g_usb_init_enabled = false;
+static bool s_usb_started = false;
+
+// Blue Pill hardware note:
+// Your schematic shows a fixed 1.5k pull-up (R10) from D+ to 3V3. That means the
+// host will see an attach as soon as you plug the cable in, even if firmware
+// hasn't initialized USB yet.
+//
+// Workaround (no hardware change): drive PA12 (D+) low as GPIO until we are
+// ready to start USB, then release it.
+#ifndef USB_HOLD_DP_LOW_UNTIL_USB_START
+#define USB_HOLD_DP_LOW_UNTIL_USB_START 1
+#endif
+
+static bool s_usb_dp_held_low = false;
+
+static void usb_dp_hold_low(bool hold)
+{
+#if (USB_HOLD_DP_LOW_UNTIL_USB_START != 0)
+    GPIO_InitTypeDef gpio = {0};
+    gpio.Pin = GPIO_PIN_12; // PA12 = USB D+
+
+    if (hold)
+    {
+        gpio.Mode = GPIO_MODE_OUTPUT_OD;
+        gpio.Speed = GPIO_SPEED_FREQ_LOW;
+        HAL_GPIO_Init(GPIOA, &gpio);
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_12, GPIO_PIN_RESET);
+        s_usb_dp_held_low = true;
+    }
+    else
+    {
+        // Release to USB peripheral. Floating input avoids fighting the pull-up.
+        gpio.Mode = GPIO_MODE_INPUT;
+        gpio.Pull = GPIO_NOPULL;
+        HAL_GPIO_Init(GPIOA, &gpio);
+        s_usb_dp_held_low = false;
+    }
+#else
+    (void)hold;
+#endif
+}
+
+// Test: attach USB after a delay from power-on.
+// Set to 0 to disable this auto-attach behavior.
+#ifndef USB_TEST_ATTACH_DELAY_MS
+#define USB_TEST_ATTACH_DELAY_MS 20000U
+#endif
+
+static uint32_t s_boot_ms = 0U;
+
+static void usb_start_if_enabled(void)
+{
+    if (s_usb_started || !g_usb_init_enabled)
+    {
+        return;
+    }
+
+#if (USB_HOLD_DP_LOW_UNTIL_USB_START != 0)
+    // Keep D+ low during init, then release after stack is ready.
+    bool const release_dp_after_init = s_usb_dp_held_low;
+#else
+    bool const release_dp_after_init = false;
+#endif
+
+    MX_USB_PCD_Init();
+    tusb_init();
+
+    if (release_dp_after_init)
+    {
+        usb_dp_hold_low(false);
+        // Give the host a moment to detect attach before first control traffic.
+        HAL_Delay(5);
+    }
+
+    (void)tud_connect();
+    s_usb_started = true;
+}
+
 // Simple UART engine demo: send 'Y' and print the response.
 //
 // Notes:
-// - uart_engine requires a fixed expected_len. For 'Y', the UPS replies with
-//   2 data bytes + CRLF (0x0D 0x0A) => 4 bytes total.
+// - uart_engine now supports terminator-based RX completion.
+// - For 'Y', this demo waits for CRLF (0x0D 0x0A) and uses expected_len as
+//   a maximum capture size.
 // - Printing uses printf(), which is retargeted to SWO/ITM by _write below.
 
 #ifndef UART_TEST_Y_ENABLED
@@ -82,12 +165,8 @@ static void MX_USB_PCD_Init(void);
 #define UART_TEST_Y_PERIOD_MS 5000U
 #endif
 
-#ifndef UART_TEST_Y_EXPECTED_LEN
-#define UART_TEST_Y_EXPECTED_LEN 4U
-#endif
-
-#ifndef UART_TEST_Y_CMD_CRLF_COUNT
-#define UART_TEST_Y_CMD_CRLF_COUNT 0U
+#ifndef UART_TEST_Y_RX_MAX_LEN
+#define UART_TEST_Y_RX_MAX_LEN 16U
 #endif
 
 #ifndef UART_TEST_Y_RX_TIMEOUT_MS
@@ -105,11 +184,10 @@ typedef struct
 
 static uart_test_y_ctx_t s_uart_test_y;
 
-static bool uart_test_y_process(const uint8_t *rx, uint16_t rx_len, void *out_value, void *user_ctx)
+static bool uart_test_y_process(uint16_t cmd, const uint8_t *rx, uint16_t rx_len, void *out_value)
 {
-    (void)out_value;
-
-    uart_test_y_ctx_t *ctx = (uart_test_y_ctx_t *)user_ctx;
+    (void)cmd;
+    uart_test_y_ctx_t *ctx = (uart_test_y_ctx_t *)out_value;
     if (ctx == NULL)
     {
         return false;
@@ -188,15 +266,16 @@ static void uart_engine_send_Y_and_print_task(void)
     if (!s_uart_test_y.in_flight && ((int32_t)(now_ms - next_send_ms) >= 0))
     {
         uart_engine_request_t req = {
-            .out_value = NULL,
+            .out_value = &s_uart_test_y,
             .cmd = (uint16_t)'Y',
             .cmd_bits = 8U,
-            .crlf_count = (uint8_t)UART_TEST_Y_CMD_CRLF_COUNT,
-            .expected_len = (uint16_t)UART_TEST_Y_EXPECTED_LEN,
+            .expected_len = (uint16_t)UART_TEST_Y_RX_MAX_LEN,
+            .expected_ending = true,
+            .expected_ending_len = 2U,
+            .expected_ending_bytes = {0x0DU, 0x0AU},
             .timeout_ms = (uint32_t)UART_TEST_Y_RX_TIMEOUT_MS,
             .max_retries = 0U,
             .process_fn = uart_test_y_process,
-            .user_ctx = &s_uart_test_y,
         };
 
         uart_engine_result_t const r = uart_engine_enqueue(&req);
@@ -218,6 +297,7 @@ static void uart_engine_send_Y_and_print_task(void)
 // UART engine enable switch.
 // Set UART_ENGINE_DEFAULT_ENABLED to 0 to compile with UART polling disabled.
 #ifndef UART_ENGINE_DEFAULT_ENABLED
+
 #define UART_ENGINE_DEFAULT_ENABLED 1
 #endif
 
@@ -368,48 +448,58 @@ int main(void)
     /* Configure the system clock */
     SystemClock_Config();
 
+    // s_boot_ms = HAL_GetTick();
+
     /* USER CODE BEGIN SysInit */
 
     /* USER CODE END SysInit */
 
     /* Initialize all configured peripherals */
     MX_GPIO_Init();
+
+#if (USB_HOLD_DP_LOW_UNTIL_USB_START != 0)
+    // Prevent early attach until we deliberately start USB.
+    if (!g_usb_init_enabled)
+    {
+        usb_dp_hold_low(true);
+    }
+#endif
+
     MX_USART1_UART_Init();
     MX_USART2_UART_Init();
-    MX_USB_PCD_Init();
-
-    tusb_init();
     UART2_RxStartIT();
     uart_engine_init();
     uart_engine_set_enabled(s_uart_engine_enabled);
-
-    /* USER CODE BEGIN 2 */
-    if (g_battery.manufacturer_date == 0U)
-    {
-        uint16_t packed_date = 0U;
-        if (pack_hid_date_mmddyy("02/02/26", &packed_date))
-        {
-            g_battery.manufacturer_date = packed_date;
-        }
-    }
-
-    /* USER CODE END 2 */
 
     /* Infinite loop */
     /* USER CODE BEGIN WHILE */
     while (1)
     {
         /* USER CODE END WHILE */
-        tud_task(); // TinyUSB device task
-        /* USER CODE BEGIN 3 */
 
+// #if (USB_TEST_ATTACH_DELAY_MS != 0U)
+//         if (!g_usb_init_enabled)
+//         {
+//             uint32_t const now_ms = HAL_GetTick();
+//             if ((now_ms - s_boot_ms) >= (uint32_t)USB_TEST_ATTACH_DELAY_MS)
+//             {
+//                 g_usb_init_enabled = true;
+//             }
+//         }
+// #endif
+
+        usb_start_if_enabled();
+        if (s_usb_started) {
+            tud_task(); // TinyUSB device task
+            ups_hid_periodic_task();
+
+        }
         // // Quick test: decay remaining capacity every 30 seconds.
         // test_decay_remaining_capacity();
         // test_increase_remaining_capacity(); 
 
         uart_engine_send_Y_and_print_task();
         uart_engine_tick();
-        ups_hid_periodic_task();
     }
     /* USER CODE END 3 */
 }

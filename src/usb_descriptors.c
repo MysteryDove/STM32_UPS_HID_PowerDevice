@@ -26,6 +26,8 @@
 #include "tusb.h"
 #include "usb_descriptors.h"
 
+#include <string.h>
+
 /* A combination of interfaces must have a unique product id, since PC will save device driver after the first plug.
  * Same VID/PID with different interface e.g MSC (first), then CDC (later) will possibly cause system error on PC.
  *
@@ -135,15 +137,89 @@ enum
 };
 
 // array of pointer to string descriptors
-static char const *string_desc_arr[] =
-    {
-        (const char[]){0x09, 0x04},  // 0: is supported language is English (0x0409)
-        "American Power Conversion", // 1: Manufacturer
-        "SPM2K",                     // 2: Product
-        "1145141919810",             // 3: Serials will use unique ID if possible
-    "APC UPS Battery",           // 4: HID iName
-    "PbAc",                      // 5: HID iDeviceChemistery
+
+#ifndef USB_DESC_STR_MAX_CHARS
+#define USB_DESC_STR_MAX_CHARS 32U
+#endif
+
+static char s_usb_str_manufacturer[USB_DESC_STR_MAX_CHARS] = "American Power Conversion";
+static char s_usb_str_product[USB_DESC_STR_MAX_CHARS] = "SPM2K";
+static char s_usb_str_serial[USB_DESC_STR_MAX_CHARS] = "1145141919810";
+static char s_usb_str_hid_iname[USB_DESC_STR_MAX_CHARS] = "APC UPS";
+static char s_usb_str_hid_chem[USB_DESC_STR_MAX_CHARS] = "PbAc";
+
+static char const *string_desc_arr[] = {
+    (const char[]){0x09, 0x04}, // 0: supported language is English (0x0409)
+    s_usb_str_manufacturer,     // 1: Manufacturer
+    s_usb_str_product,          // 2: Product
+    s_usb_str_serial,           // 3: Serial
+    s_usb_str_hid_iname,        // 4: HID iName
+    s_usb_str_hid_chem,         // 5: HID iDeviceChemistery
 };
+
+uint8_t usb_desc_string_count(void)
+{
+    return (uint8_t)(sizeof(string_desc_arr) / sizeof(string_desc_arr[0]));
+}
+
+const char *usb_desc_get_string_ascii(uint8_t index)
+{
+    uint8_t const count = usb_desc_string_count();
+    if ((index == 0U) || (index >= count))
+    {
+        return NULL;
+    }
+    return string_desc_arr[index];
+}
+
+static char *usb_desc_mutable_string_for_index(uint8_t index)
+{
+    switch (index)
+    {
+    case USB_STRID_MANUFACTURER:
+        return s_usb_str_manufacturer;
+    case USB_STRID_PRODUCT:
+        return s_usb_str_product;
+    case USB_STRID_SERIAL:
+        return s_usb_str_serial;
+    case USB_STRID_HID_INAME:
+        return s_usb_str_hid_iname;
+    case USB_STRID_HID_DEVICE_CHEM:
+        return s_usb_str_hid_chem;
+    default:
+        return NULL;
+    }
+}
+
+bool usb_desc_set_string_ascii(uint8_t index, const char *str)
+{
+    if ((index == 0U) || (str == NULL))
+    {
+        return false;
+    }
+
+    char *dst = usb_desc_mutable_string_for_index(index);
+    if (dst == NULL)
+    {
+        return false;
+    }
+
+    size_t i = 0U;
+    while ((i + 1U) < (size_t)USB_DESC_STR_MAX_CHARS)
+    {
+        char const c = str[i];
+        dst[i] = c;
+        if (c == '\0')
+        {
+            return true;
+        }
+        i++;
+    }
+
+    // Ensure null termination if truncated.
+    dst[USB_DESC_STR_MAX_CHARS - 1U] = '\0';
+    return true;
+}
 
 static uint16_t _desc_str[32 + 1];
 
