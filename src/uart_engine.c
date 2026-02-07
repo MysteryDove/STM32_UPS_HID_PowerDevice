@@ -340,6 +340,11 @@ bool uart_engine_is_enabled(void)
     return s_enabled;
 }
 
+bool uart_engine_is_busy(void)
+{
+    return (s_state != UART_ENGINE_STATE_IDLE) || (s_q_count != 0U);
+}
+
 /**
  * @brief Enqueue a UART request for execution by uart_engine_tick().
  * @param req Request descriptor (command, expected length, timeout, callback).

@@ -58,6 +58,7 @@ void uart_engine_init(void);
 // - UART lock is released (so other code won't deadlock)
 void uart_engine_set_enabled(bool enable);
 bool uart_engine_is_enabled(void);
+bool uart_engine_is_busy(void);
 
 // Call frequently (e.g., each main loop iteration).
 void uart_engine_tick(void);

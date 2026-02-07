@@ -35,10 +35,7 @@ const uart_engine_request_t g_spm2k_constant_lut[] = {
     { .out_value = &g_power_summary.i_product_2bit, .cmd = (uint16_t)0x01U, .cmd_bits = 8U, .expected_len = SPM2K_LINE_MAX_LEN, .expected_ending = true, .expected_ending_len = 2U, .expected_ending_bytes = {0x0DU, 0x0AU}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = spm2k_process_string },
     { .out_value = &g_power_summary.i_serial_number_2bit, .cmd = (uint16_t)0x6EU, .cmd_bits = 8U, .expected_len = SPM2K_LINE_MAX_LEN, .expected_ending = true, .expected_ending_len = 2U, .expected_ending_bytes = {0x0DU, 0x0AU}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = spm2k_process_string },
 
-    { .out_value = &g_output.config_active_power, .cmd = (uint16_t)0x9FD1U, .cmd_bits = 16U, .expected_len = SPM2K_LINE_MAX_LEN, .expected_ending = true, .expected_ending_len = 2U, .expected_ending_bytes = {0x0DU, 0x0AU}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = spm2k_process_rated_info },
-    { .out_value = &g_input.config_voltage, .cmd = (uint16_t)0x9FD1U, .cmd_bits = 16U, .expected_len = SPM2K_LINE_MAX_LEN, .expected_ending = true, .expected_ending_len = 2U, .expected_ending_bytes = {0x0DU, 0x0AU}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = spm2k_process_rated_info },
-    { .out_value = &g_output.config_voltage, .cmd = (uint16_t)0x9FD1U, .cmd_bits = 16U, .expected_len = SPM2K_LINE_MAX_LEN, .expected_ending = true, .expected_ending_len = 2U, .expected_ending_bytes = {0x0DU, 0x0AU}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = spm2k_process_rated_info },
-    { .out_value = &g_battery.config_voltage, .cmd = (uint16_t)0x9FD1U, .cmd_bits = 16U, .expected_len = SPM2K_LINE_MAX_LEN, .expected_ending = true, .expected_ending_len = 2U, .expected_ending_bytes = {0x0DU, 0x0AU}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = spm2k_process_rated_info },
+    { .out_value = NULL, .cmd = (uint16_t)0x9FD1U, .cmd_bits = 16U, .expected_len = SPM2K_LINE_MAX_LEN, .expected_ending = true, .expected_ending_len = 2U, .expected_ending_bytes = {0x0DU, 0x0AU}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = spm2k_process_rated_info },
 
     { .out_value = &g_battery.manufacturer_date, .cmd = (uint16_t)0x78U, .cmd_bits = 8U, .expected_len = 16U, .expected_ending = true, .expected_ending_len = 2U, .expected_ending_bytes = {0x0DU, 0x0AU}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = spm2k_process_manufacturer_date },
 
@@ -66,6 +63,12 @@ const uart_engine_request_t g_spm2k_dynamic_lut[] = {
     { .out_value = &g_output.current, .cmd = (uint16_t)0x2FU, .cmd_bits = 8U, .expected_len = 16U, .expected_ending = true, .expected_ending_len = 2U, .expected_ending_bytes = {0x0DU, 0x0AU}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = spm2k_process_ac_current },
     { .out_value = &g_output.frequency, .cmd = (uint16_t)0x46U, .cmd_bits = 8U, .expected_len = 16U, .expected_ending = true, .expected_ending_len = 2U, .expected_ending_bytes = {0x0DU, 0x0AU}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = spm2k_process_frequency },
 };
+
+const uart_engine_request_t g_spm2k_constant_heartbeat =
+    { .out_value = NULL, .cmd = (uint16_t)0x59U, .cmd_bits = 8U, .expected_len = 4U, .expected_ending = false, .expected_ending_len = 0U, .expected_ending_bytes = {0}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = NULL };
+
+const uint8_t g_spm2k_constant_heartbeat_expect_return[] = {0x53U, 0x4DU, 0x0DU, 0x0AU}; // "SM\r\n"
+const size_t g_spm2k_constant_heartbeat_expect_return_len = sizeof(g_spm2k_constant_heartbeat_expect_return);
 
 const size_t g_spm2k_dynamic_lut_count = sizeof(g_spm2k_dynamic_lut) / sizeof(g_spm2k_dynamic_lut[0]);
 
@@ -305,11 +308,7 @@ bool spm2k_process_string(uint16_t cmd, const uint8_t *rx, uint16_t rx_len, void
 bool spm2k_process_rated_info(uint16_t cmd, const uint8_t *rx, uint16_t rx_len, void *out_value)
 {
     (void)cmd;
-
-    if (out_value == NULL)
-    {
-        return false;
-    }
+    (void)out_value;
 
     char text[48];
     if (!spm2k_extract_text(rx, rx_len, true, text, sizeof(text)))
@@ -317,46 +316,41 @@ bool spm2k_process_rated_info(uint16_t cmd, const uint8_t *rx, uint16_t rx_len, 
         return false;
     }
 
-    uint8_t field = 0U;
-    int32_t scale = 1;
-    if (out_value == &g_output.config_active_power)
-    {
-        field = 0U;
-        scale = 1;
-    }
-    else if (out_value == &g_input.config_voltage)
-    {
-        field = 1U;
-        scale = 100;
-    }
-    else if (out_value == &g_output.config_voltage)
-    {
-        field = 2U;
-        scale = 100;
-    }
-    else if (out_value == &g_battery.config_voltage)
-    {
-        field = 5U;
-        scale = 100;
-    }
-    else
-    {
-        return false;
-    }
-
     char token[16];
-    if (!spm2k_get_csv_field(text, field, token, sizeof(token)))
+    int32_t parsed_config_active_power = 0;
+    int32_t parsed_input_config_voltage = 0;
+    int32_t parsed_output_config_voltage = 0;
+    int32_t parsed_battery_config_voltage = 0;
+
+    if (!spm2k_get_csv_field(text, 0U, token, sizeof(token)) ||
+        !spm2k_parse_scaled_int(token, 1, 0, UINT16_MAX, &parsed_config_active_power))
     {
         return false;
     }
 
-    int32_t parsed = 0;
-    if (!spm2k_parse_scaled_int(token, scale, 0, UINT16_MAX, &parsed))
+    if (!spm2k_get_csv_field(text, 1U, token, sizeof(token)) ||
+        !spm2k_parse_scaled_int(token, 100, 0, UINT16_MAX, &parsed_input_config_voltage))
     {
         return false;
     }
 
-    *(uint16_t *)out_value = (uint16_t)parsed;
+    if (!spm2k_get_csv_field(text, 2U, token, sizeof(token)) ||
+        !spm2k_parse_scaled_int(token, 100, 0, UINT16_MAX, &parsed_output_config_voltage))
+    {
+        return false;
+    }
+
+    if (!spm2k_get_csv_field(text, 5U, token, sizeof(token)) ||
+        !spm2k_parse_scaled_int(token, 100, 0, UINT16_MAX, &parsed_battery_config_voltage))
+    {
+        return false;
+    }
+
+    g_output.config_active_power = (uint16_t)parsed_config_active_power;
+    g_input.config_voltage = (uint16_t)parsed_input_config_voltage;
+    g_output.config_voltage = (uint16_t)parsed_output_config_voltage;
+    g_battery.config_voltage = (uint16_t)parsed_battery_config_voltage;
+
     return true;
 }
 

@@ -26,6 +26,12 @@ extern const size_t g_spm2k_constant_lut_count;
 extern const uart_engine_request_t g_spm2k_dynamic_lut[];
 extern const size_t g_spm2k_dynamic_lut_count;
 
+// Heartbeat definition for SPM2K sub-adapter.
+// Expected response must fully match g_spm2k_constant_heartbeat_expect_return.
+extern const uart_engine_request_t g_spm2k_constant_heartbeat;
+extern const uint8_t g_spm2k_constant_heartbeat_expect_return[];
+extern const size_t g_spm2k_constant_heartbeat_expect_return_len;
+
 bool spm2k_process_string(uint16_t cmd, const uint8_t *rx, uint16_t rx_len, void *out_value);
 bool spm2k_process_rated_info(uint16_t cmd, const uint8_t *rx, uint16_t rx_len, void *out_value);
 bool spm2k_process_manufacturer_date(uint16_t cmd, const uint8_t *rx, uint16_t rx_len, void *out_value);

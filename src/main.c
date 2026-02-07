@@ -23,10 +23,11 @@
 #include "ups_hid_reports.h"
 #include "ups_hid_device.h"
 #include "uart_engine.h"
+#include "spm2k.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <string.h>
 #include <stdbool.h>
+#include <string.h>
 
 /* USER CODE END Includes */
 
@@ -84,6 +85,39 @@ static bool s_usb_started = false;
 #define USB_HOLD_DP_LOW_UNTIL_USB_START 1
 #endif
 
+#ifndef UPS_DYNAMIC_UPDATE_PERIOD_S
+#define UPS_DYNAMIC_UPDATE_PERIOD_S 5U
+#endif
+
+#ifndef UPS_INIT_RETRY_PERIOD_S
+#define UPS_INIT_RETRY_PERIOD_S 5U
+#endif
+
+#ifndef UPS_DEBUG_STATUS_PRINT_ENABLED
+#define UPS_DEBUG_STATUS_PRINT_ENABLED 1
+#endif
+
+#ifndef UPS_DEBUG_STATUS_PRINT_PERIOD_MS
+#define UPS_DEBUG_STATUS_PRINT_PERIOD_MS 10000U
+#endif
+
+#ifndef UPS_LED_BUSY_BLINK_PERIOD_MS
+#define UPS_LED_BUSY_BLINK_PERIOD_MS 80U
+#endif
+
+#ifndef UPS_BOOTSTRAP_HEARTBEAT_RX_BUF_SIZE
+#define UPS_BOOTSTRAP_HEARTBEAT_RX_BUF_SIZE 16U
+#endif
+
+#define UPS_DYNAMIC_UPDATE_PERIOD_MS ((uint32_t)(UPS_DYNAMIC_UPDATE_PERIOD_S) * 1000U)
+#define UPS_INIT_RETRY_PERIOD_MS ((uint32_t)(UPS_INIT_RETRY_PERIOD_S) * 1000U)
+
+#if (UPS_DEBUG_STATUS_PRINT_ENABLED != 0)
+#define UPS_DEBUG_PRINTF(...) printf(__VA_ARGS__)
+#else
+#define UPS_DEBUG_PRINTF(...)
+#endif
+
 static bool s_usb_dp_held_low = false;
 
 static void usb_dp_hold_low(bool hold)
@@ -113,14 +147,6 @@ static void usb_dp_hold_low(bool hold)
 #endif
 }
 
-// Test: attach USB after a delay from power-on.
-// Set to 0 to disable this auto-attach behavior.
-#ifndef USB_TEST_ATTACH_DELAY_MS
-#define USB_TEST_ATTACH_DELAY_MS 20000U
-#endif
-
-static uint32_t s_boot_ms = 0U;
-
 static void usb_start_if_enabled(void)
 {
     if (s_usb_started || !g_usb_init_enabled)
@@ -149,149 +175,390 @@ static void usb_start_if_enabled(void)
     s_usb_started = true;
 }
 
-// Simple UART engine demo: send 'Y' and print the response.
-//
-// Notes:
-// - uart_engine now supports terminator-based RX completion.
-// - For 'Y', this demo waits for CRLF (0x0D 0x0A) and uses expected_len as
-//   a maximum capture size.
-// - Printing uses printf(), which is retargeted to SWO/ITM by _write below.
-
-#ifndef UART_TEST_Y_ENABLED
-#define UART_TEST_Y_ENABLED 1
-#endif
-
-#ifndef UART_TEST_Y_PERIOD_MS
-#define UART_TEST_Y_PERIOD_MS 5000U
-#endif
-
-#ifndef UART_TEST_Y_RX_MAX_LEN
-#define UART_TEST_Y_RX_MAX_LEN 16U
-#endif
-
-#ifndef UART_TEST_Y_RX_TIMEOUT_MS
-#define UART_TEST_Y_RX_TIMEOUT_MS 250U
-#endif
-
-typedef struct
+typedef enum
 {
-    bool in_flight;
-    bool done;
-    uint32_t started_ms;
-    uint16_t len;
-    uint8_t buf[64];
-} uart_test_y_ctx_t;
+    UPS_SUB_ADAPTER_SPM2K = 0,
+} ups_sub_adapter_t;
 
-static uart_test_y_ctx_t s_uart_test_y;
+#ifndef UPS_ACTIVE_SUB_ADAPTER
+#define UPS_ACTIVE_SUB_ADAPTER UPS_SUB_ADAPTER_SPM2K
+#endif
 
-static bool uart_test_y_process(uint16_t cmd, const uint8_t *rx, uint16_t rx_len, void *out_value)
+typedef enum
+{
+    UPS_BOOTSTRAP_ENQUEUE_HEARTBEAT = 0,
+    UPS_BOOTSTRAP_WAIT_HEARTBEAT_DRAIN,
+    UPS_BOOTSTRAP_HEARTBEAT_VERIFY,
+    UPS_BOOTSTRAP_WAIT_RETRY,
+    UPS_BOOTSTRAP_ENQUEUE_CONSTANT,
+    UPS_BOOTSTRAP_ENQUEUE_DYNAMIC,
+    UPS_BOOTSTRAP_WAIT_DRAIN,
+    UPS_BOOTSTRAP_SANITY_CHECK,
+    UPS_BOOTSTRAP_DONE,
+} ups_bootstrap_state_t;
+
+static const uart_engine_request_t *g_sub_adapter_constant_lut = NULL;
+static size_t g_sub_adapter_constant_lut_count = 0U;
+static const uart_engine_request_t *g_sub_adapter_dynamic_lut = NULL;
+static size_t g_sub_adapter_dynamic_lut_count = 0U;
+static const uart_engine_request_t *g_sub_adapter_constant_heartbeat = NULL;
+static const uint8_t *g_sub_adapter_constant_heartbeat_expect_return = NULL;
+static size_t g_sub_adapter_constant_heartbeat_expect_return_len = 0U;
+
+static ups_bootstrap_state_t s_ups_bootstrap_state = UPS_BOOTSTRAP_ENQUEUE_HEARTBEAT;
+static size_t s_bootstrap_constant_idx = 0U;
+static size_t s_bootstrap_dynamic_idx = 0U;
+static uint32_t s_init_retry_not_before_ms = 0U;
+static uint32_t s_init_bootstrap_start_ms = 0U;
+static bool s_init_bootstrap_started = false;
+static uint32_t s_last_dynamic_cycle_start_ms = 0U;
+
+static uint8_t s_bootstrap_heartbeat_rx[UPS_BOOTSTRAP_HEARTBEAT_RX_BUF_SIZE];
+static uint16_t s_bootstrap_heartbeat_rx_len = 0U;
+static bool s_bootstrap_heartbeat_done = false;
+
+static bool s_dynamic_update_cycle_active = false;
+static size_t s_dynamic_update_idx = 0U;
+static uint32_t s_next_dynamic_update_ms = 0U;
+
+static void ups_sub_adapter_select(void)
+{
+    switch ((ups_sub_adapter_t)UPS_ACTIVE_SUB_ADAPTER)
+    {
+    case UPS_SUB_ADAPTER_SPM2K:
+        g_sub_adapter_constant_lut = g_spm2k_constant_lut;
+        g_sub_adapter_constant_lut_count = g_spm2k_constant_lut_count;
+        g_sub_adapter_dynamic_lut = g_spm2k_dynamic_lut;
+        g_sub_adapter_dynamic_lut_count = g_spm2k_dynamic_lut_count;
+        g_sub_adapter_constant_heartbeat = &g_spm2k_constant_heartbeat;
+        g_sub_adapter_constant_heartbeat_expect_return = g_spm2k_constant_heartbeat_expect_return;
+        g_sub_adapter_constant_heartbeat_expect_return_len = g_spm2k_constant_heartbeat_expect_return_len;
+        break;
+    default:
+        g_sub_adapter_constant_lut = NULL;
+        g_sub_adapter_constant_lut_count = 0U;
+        g_sub_adapter_dynamic_lut = NULL;
+        g_sub_adapter_dynamic_lut_count = 0U;
+        g_sub_adapter_constant_heartbeat = NULL;
+        g_sub_adapter_constant_heartbeat_expect_return = NULL;
+        g_sub_adapter_constant_heartbeat_expect_return_len = 0U;
+        break;
+    }
+}
+
+static bool ups_bootstrap_heartbeat_capture(uint16_t cmd,
+                                            const uint8_t *rx,
+                                            uint16_t rx_len,
+                                            void *out_value)
 {
     (void)cmd;
-    uart_test_y_ctx_t *ctx = (uart_test_y_ctx_t *)out_value;
-    if (ctx == NULL)
+    (void)out_value;
+
+    s_bootstrap_heartbeat_done = false;
+    s_bootstrap_heartbeat_rx_len = 0U;
+
+    if (rx == NULL)
     {
         return false;
     }
 
-    ctx->len = 0U;
-
-    if ((rx != NULL) && (rx_len != 0U))
+    if (rx_len > (uint16_t)sizeof(s_bootstrap_heartbeat_rx))
     {
-        uint16_t copy_len = rx_len;
-        if (copy_len > (uint16_t)sizeof(ctx->buf))
-        {
-            copy_len = (uint16_t)sizeof(ctx->buf);
-        }
-        (void)memcpy(ctx->buf, rx, copy_len);
-        ctx->len = copy_len;
+        return false;
     }
 
-    // Drain any additional already-buffered bytes (non-blocking).
-    uint16_t avail = UART2_Available();
-    if (avail != 0U)
-    {
-        uint16_t cap = (uint16_t)(sizeof(ctx->buf) - ctx->len);
-        if (cap != 0U)
-        {
-            uint16_t want = avail;
-            if (want > cap)
-            {
-                want = cap;
-            }
-            ctx->len += UART2_Read(&ctx->buf[ctx->len], want);
-        }
-    }
-
-    ctx->done = true;
-    ctx->in_flight = false;
+    memcpy(s_bootstrap_heartbeat_rx, rx, rx_len);
+    s_bootstrap_heartbeat_rx_len = rx_len;
+    s_bootstrap_heartbeat_done = true;
     return true;
 }
 
-static void uart_engine_send_Y_and_print_task(void)
+static bool ups_bootstrap_heartbeat_matches_expected(void)
 {
-#if (UART_TEST_Y_ENABLED != 0)
-    if (!uart_engine_is_enabled())
+    if (!s_bootstrap_heartbeat_done ||
+        (g_sub_adapter_constant_heartbeat_expect_return == NULL) ||
+        (g_sub_adapter_constant_heartbeat_expect_return_len == 0U))
+    {
+        return false;
+    }
+
+    if (s_bootstrap_heartbeat_rx_len != g_sub_adapter_constant_heartbeat_expect_return_len)
+    {
+        return false;
+    }
+
+    return (memcmp(s_bootstrap_heartbeat_rx,
+                   g_sub_adapter_constant_heartbeat_expect_return,
+                   s_bootstrap_heartbeat_rx_len) == 0);
+}
+
+static void ups_bootstrap_reset_for_retry(uint32_t now_ms)
+{
+    s_bootstrap_constant_idx = 0U;
+    s_bootstrap_dynamic_idx = 0U;
+    s_bootstrap_heartbeat_rx_len = 0U;
+    s_bootstrap_heartbeat_done = false;
+    s_init_retry_not_before_ms = now_ms + UPS_INIT_RETRY_PERIOD_MS;
+    s_ups_bootstrap_state = UPS_BOOTSTRAP_WAIT_RETRY;
+}
+
+static void ups_enqueue_full_lut_step(const uart_engine_request_t *lut,
+                                      size_t lut_count,
+                                      size_t *inout_index)
+{
+    if ((lut == NULL) || (inout_index == NULL))
+    {
+        return;
+    }
+
+    if (*inout_index >= lut_count)
+    {
+        return;
+    }
+
+    uart_engine_result_t const result = uart_engine_enqueue(&lut[*inout_index]);
+    if (result == UART_ENGINE_OK)
+    {
+        (*inout_index)++;
+    }
+}
+
+static void ups_bootstrap_task(void)
+{
+    uint32_t const now_ms = HAL_GetTick();
+
+    if (!s_init_bootstrap_started)
+    {
+        s_init_bootstrap_started = true;
+        s_init_bootstrap_start_ms = now_ms;
+    }
+
+    switch (s_ups_bootstrap_state)
+    {
+    case UPS_BOOTSTRAP_ENQUEUE_HEARTBEAT:
+    {
+        if (g_sub_adapter_constant_heartbeat == NULL)
+        {
+            ups_bootstrap_reset_for_retry(now_ms);
+            break;
+        }
+
+        uart_engine_request_t hb_req = *g_sub_adapter_constant_heartbeat;
+        hb_req.out_value = NULL;
+        hb_req.process_fn = ups_bootstrap_heartbeat_capture;
+
+        uart_engine_result_t const result = uart_engine_enqueue(&hb_req);
+        if (result == UART_ENGINE_OK)
+        {
+            s_bootstrap_heartbeat_done = false;
+            s_ups_bootstrap_state = UPS_BOOTSTRAP_WAIT_HEARTBEAT_DRAIN;
+        }
+        break;
+    }
+
+    case UPS_BOOTSTRAP_WAIT_HEARTBEAT_DRAIN:
+        if (!uart_engine_is_busy())
+        {
+            s_ups_bootstrap_state = UPS_BOOTSTRAP_HEARTBEAT_VERIFY;
+        }
+        break;
+
+    case UPS_BOOTSTRAP_HEARTBEAT_VERIFY:
+        if (ups_bootstrap_heartbeat_matches_expected())
+        {
+            s_ups_bootstrap_state = UPS_BOOTSTRAP_ENQUEUE_CONSTANT;
+        }
+        else
+        {
+            UPS_DEBUG_PRINTF("INIT heartbeat failed, retry in %lu ms\r\n",
+                             (unsigned long)UPS_INIT_RETRY_PERIOD_MS);
+            ups_bootstrap_reset_for_retry(now_ms);
+        }
+        break;
+
+    case UPS_BOOTSTRAP_WAIT_RETRY:
+        if ((int32_t)(now_ms - s_init_retry_not_before_ms) >= 0)
+        {
+            s_ups_bootstrap_state = UPS_BOOTSTRAP_ENQUEUE_HEARTBEAT;
+        }
+        break;
+
+    case UPS_BOOTSTRAP_ENQUEUE_CONSTANT:
+        ups_enqueue_full_lut_step(g_sub_adapter_constant_lut,
+                                  g_sub_adapter_constant_lut_count,
+                                  &s_bootstrap_constant_idx);
+        if (s_bootstrap_constant_idx >= g_sub_adapter_constant_lut_count)
+        {
+            s_ups_bootstrap_state = UPS_BOOTSTRAP_ENQUEUE_DYNAMIC;
+        }
+        break;
+
+    case UPS_BOOTSTRAP_ENQUEUE_DYNAMIC:
+        ups_enqueue_full_lut_step(g_sub_adapter_dynamic_lut,
+                                  g_sub_adapter_dynamic_lut_count,
+                                  &s_bootstrap_dynamic_idx);
+        if (s_bootstrap_dynamic_idx >= g_sub_adapter_dynamic_lut_count)
+        {
+            s_ups_bootstrap_state = UPS_BOOTSTRAP_WAIT_DRAIN;
+        }
+        break;
+
+    case UPS_BOOTSTRAP_WAIT_DRAIN:
+        if (!uart_engine_is_busy())
+        {
+            s_ups_bootstrap_state = UPS_BOOTSTRAP_SANITY_CHECK;
+        }
+        break;
+
+    case UPS_BOOTSTRAP_SANITY_CHECK:
+        if (g_battery.remaining_capacity > 0U)
+        {
+            g_usb_init_enabled = true;
+            s_next_dynamic_update_ms = HAL_GetTick() + UPS_DYNAMIC_UPDATE_PERIOD_MS;
+            s_ups_bootstrap_state = UPS_BOOTSTRAP_DONE;
+            UPS_DEBUG_PRINTF("INIT full bootstrap done in %lu ms\r\n",
+                             (unsigned long)(now_ms - s_init_bootstrap_start_ms));
+        }
+        else
+        {
+            UPS_DEBUG_PRINTF("INIT sanity failed (remaining_capacity=0), retry in %lu ms\r\n",
+                             (unsigned long)UPS_INIT_RETRY_PERIOD_MS);
+            ups_bootstrap_reset_for_retry(now_ms);
+        }
+        break;
+
+    case UPS_BOOTSTRAP_DONE:
+    default:
+        break;
+    }
+}
+
+static void ups_dynamic_update_task(void)
+{
+    if (s_ups_bootstrap_state != UPS_BOOTSTRAP_DONE)
     {
         return;
     }
 
     uint32_t const now_ms = HAL_GetTick();
-    static uint32_t next_send_ms = 0U;
-
-    // Detect a lost request (engine has no user-visible failure callback).
-    if (s_uart_test_y.in_flight)
+    if (!s_dynamic_update_cycle_active)
     {
-        // TX wait has its own timeout (UART_ENGINE_TX_TIMEOUT_MS). Add margin.
-        uint32_t const overall_timeout_ms = (uint32_t)UART_TEST_Y_RX_TIMEOUT_MS + 600U;
-        if ((now_ms - s_uart_test_y.started_ms) >= overall_timeout_ms)
+        if ((int32_t)(now_ms - s_next_dynamic_update_ms) < 0)
         {
-            s_uart_test_y.in_flight = false;
-            printf("UART 'Y' request timed out\r\n");
+            return;
         }
+
+        s_dynamic_update_cycle_active = true;
+        s_dynamic_update_idx = 0U;
+        s_last_dynamic_cycle_start_ms = now_ms;
     }
 
-    if (s_uart_test_y.done)
+    if (s_dynamic_update_idx < g_sub_adapter_dynamic_lut_count)
     {
-        printf("UART 'Y' reply (%u bytes): ", (unsigned)s_uart_test_y.len);
-        for (uint16_t i = 0U; i < s_uart_test_y.len; i++)
-        {
-            printf("%02X ", (unsigned)s_uart_test_y.buf[i]);
-        }
-        printf("\r\n");
-
-        s_uart_test_y.done = false;
-        s_uart_test_y.len = 0U;
+        ups_enqueue_full_lut_step(g_sub_adapter_dynamic_lut,
+                                  g_sub_adapter_dynamic_lut_count,
+                                  &s_dynamic_update_idx);
+        return;
     }
 
-    if (!s_uart_test_y.in_flight && ((int32_t)(now_ms - next_send_ms) >= 0))
+    if (uart_engine_is_busy())
     {
-        uart_engine_request_t req = {
-            .out_value = &s_uart_test_y,
-            .cmd = (uint16_t)'Y',
-            .cmd_bits = 8U,
-            .expected_len = (uint16_t)UART_TEST_Y_RX_MAX_LEN,
-            .expected_ending = true,
-            .expected_ending_len = 2U,
-            .expected_ending_bytes = {0x0DU, 0x0AU},
-            .timeout_ms = (uint32_t)UART_TEST_Y_RX_TIMEOUT_MS,
-            .max_retries = 0U,
-            .process_fn = uart_test_y_process,
-        };
-
-        uart_engine_result_t const r = uart_engine_enqueue(&req);
-        if (r == UART_ENGINE_OK)
-        {
-            s_uart_test_y.in_flight = true;
-            s_uart_test_y.started_ms = now_ms;
-        }
-        else
-        {
-            printf("UART 'Y' enqueue failed: %u\r\n", (unsigned)r);
-        }
-
-        next_send_ms = now_ms + (uint32_t)UART_TEST_Y_PERIOD_MS;
+        return;
     }
+
+    s_dynamic_update_cycle_active = false;
+    s_next_dynamic_update_ms = now_ms + UPS_DYNAMIC_UPDATE_PERIOD_MS;
+    UPS_DEBUG_PRINTF("DYN refresh done in %lu ms\r\n",
+                     (unsigned long)(now_ms - s_last_dynamic_cycle_start_ms));
+}
+
+static void ups_debug_status_print_task(void)
+{
+#if (UPS_DEBUG_STATUS_PRINT_ENABLED != 0)
+    static uint32_t next_print_ms = 0U;
+    uint32_t const now_ms = HAL_GetTick();
+    if ((int32_t)(now_ms - next_print_ms) < 0)
+    {
+        return;
+    }
+
+    next_print_ms = now_ms + UPS_DEBUG_STATUS_PRINT_PERIOD_MS;
+
+    printf("PS: ac=%u chg=%u dis=%u full=%u repl=%u low=%u bpres=%u ovl=%u shut=%u\r\n",
+           (unsigned)g_power_summary_present_status.ac_present,
+           (unsigned)g_power_summary_present_status.charging,
+           (unsigned)g_power_summary_present_status.discharging,
+           (unsigned)g_power_summary_present_status.fully_charged,
+           (unsigned)g_power_summary_present_status.need_replacement,
+           (unsigned)g_power_summary_present_status.below_remaining_capacity_limit,
+           (unsigned)g_power_summary_present_status.battery_present,
+           (unsigned)g_power_summary_present_status.overload,
+           (unsigned)g_power_summary_present_status.shutdown_imminent);
+
+    printf("BAT: cap=%u rt=%u rtl=%u vb=%u ib=%d cfgv=%u temp=%u mfg=%u\r\n",
+           (unsigned)g_battery.remaining_capacity,
+           (unsigned)g_battery.run_time_to_empty_s,
+           (unsigned)g_battery.remaining_time_limit_s,
+           (unsigned)g_battery.battery_voltage,
+           (int)g_battery.battery_current,
+           (unsigned)g_battery.config_voltage,
+           (unsigned)g_battery.temperature,
+           (unsigned)g_battery.manufacturer_date);
+
+    printf("IN: v=%u f=%u cfgv=%u low=%u high=%u\r\n",
+           (unsigned)g_input.voltage,
+           (unsigned)g_input.frequency,
+           (unsigned)g_input.config_voltage,
+           (unsigned)g_input.low_voltage_transfer,
+           (unsigned)g_input.high_voltage_transfer);
+
+    printf("OUT: load=%u cfgp=%u cfgv=%u v=%u i=%d f=%u\r\n",
+           (unsigned)g_output.percent_load,
+           (unsigned)g_output.config_active_power,
+           (unsigned)g_output.config_voltage,
+           (unsigned)g_output.voltage,
+           (int)g_output.current,
+           (unsigned)g_output.frequency);
 #endif
+}
+
+static void ups_led_task(void)
+{
+    static bool led_state_low = true;
+    static uint32_t next_toggle_ms = 0U;
+
+    if (!uart_engine_is_enabled())
+    {
+        led_state_low = true;
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
+        next_toggle_ms = 0U;
+        return;
+    }
+
+    if (!uart_engine_is_busy())
+    {
+        led_state_low = true;
+        HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
+        next_toggle_ms = 0U;
+        return;
+    }
+
+    uint32_t const now_ms = HAL_GetTick();
+    if (next_toggle_ms == 0U)
+    {
+        next_toggle_ms = now_ms;
+    }
+
+    if ((int32_t)(now_ms - next_toggle_ms) < 0)
+    {
+        return;
+    }
+
+    led_state_low = !led_state_low;
+    HAL_GPIO_WritePin(GPIOC,
+                      GPIO_PIN_13,
+                      led_state_low ? GPIO_PIN_RESET : GPIO_PIN_SET);
+    next_toggle_ms = now_ms + UPS_LED_BUSY_BLINK_PERIOD_MS;
 }
 
 // UART engine enable switch.
@@ -304,13 +571,13 @@ static void uart_engine_send_Y_and_print_task(void)
 static bool s_uart_engine_enabled = (UART_ENGINE_DEFAULT_ENABLED != 0);
 
 ups_present_status_t g_power_summary_present_status = {
-    .ac_present = true,
-    .charging = true,
+    .ac_present = false,
+    .charging = false,
     .discharging = false,
     .fully_charged = false,
     .need_replacement = false,
     .below_remaining_capacity_limit = false,
-    .battery_present = true,
+    .battery_present = false,
     .overload = false,
     .shutdown_imminent = false,
 };
@@ -333,82 +600,31 @@ ups_summary_t g_power_summary ={
 };
 
 ups_battery_t g_battery = {
-    .battery_voltage = 24000,
-    .battery_current = -500,
-    .config_voltage = 24000,
-    .run_time_to_empty_s = 3600,
-    .remaining_time_limit_s = 300,
-    .temperature = 250,
+    .battery_voltage = 0,
+    .battery_current = 0,
+    .config_voltage = 0,
+    .run_time_to_empty_s = 0,
+    .remaining_time_limit_s = 0,
+    .temperature = 0,
     .manufacturer_date = 0,
-    .remaining_capacity = 20,
+    .remaining_capacity = 0,
 };
 
 ups_input_t g_input = {
-    .voltage = 22950,
-    .frequency = 5000,
-    .config_voltage = 23000,
-    .low_voltage_transfer = 18000,
-    .high_voltage_transfer = 26000,
+    .voltage = 0,
+    .frequency = 0,
+    .config_voltage = 0,
+    .low_voltage_transfer = 0,
+    .high_voltage_transfer = 0,
 };
 ups_output_t g_output = {
-    .percent_load = 50,
-    .config_active_power = 1200,
-    .config_voltage = 23000,
-    .voltage = 22950,
-    .current = 520,
-    .frequency = 5000,
+    .percent_load = 0,
+    .config_active_power = 0,
+    .config_voltage = 0,
+    .voltage = 0,
+    .current = 0,
+    .frequency = 0,
 };
-
-#ifndef TEST_DECAY_REMAINING_CAPACITY_ENABLED
-#define TEST_DECAY_REMAINING_CAPACITY_ENABLED 0
-#endif
-
-#if (TEST_DECAY_REMAINING_CAPACITY_ENABLED != 0)
-static void test_decay_remaining_capacity(void)
-{
-    static uint32_t last_ms = 0U;
-    uint32_t const now_ms = HAL_GetTick();
-
-    if ((now_ms - last_ms) < 30000U)
-    {
-        return;
-    }
-
-    last_ms = now_ms;
-    if (g_battery.remaining_capacity > 20U)
-    {
-        g_battery.remaining_capacity--;
-        if (g_battery.run_time_to_empty_s >= 30U)
-        {
-            g_battery.run_time_to_empty_s -= 30U;
-        }
-        if (g_battery.battery_voltage >= 15U)
-        {
-            g_battery.battery_voltage -= 15U;
-        }
-    }
-    g_battery.remaining_time_limit_s = g_battery.run_time_to_empty_s;
-}
-#endif
-
-static void test_increase_remaining_capacity(void)
-{
-    static uint32_t last_ms = 0U;
-    uint32_t const now_ms = HAL_GetTick();
-
-    if ((now_ms - last_ms) < 30000U)
-    {
-        return;
-    }
-
-    last_ms = now_ms;
-    if (g_battery.remaining_capacity < 100U)
-    {
-        g_battery.remaining_capacity++;
-
-    }
-    g_battery.remaining_time_limit_s = g_battery.run_time_to_empty_s;
-}
 
 int _write(int file, char *ptr, int len)
 {
@@ -448,8 +664,6 @@ int main(void)
     /* Configure the system clock */
     SystemClock_Config();
 
-    // s_boot_ms = HAL_GetTick();
-
     /* USER CODE BEGIN SysInit */
 
     /* USER CODE END SysInit */
@@ -470,6 +684,7 @@ int main(void)
     UART2_RxStartIT();
     uart_engine_init();
     uart_engine_set_enabled(s_uart_engine_enabled);
+    ups_sub_adapter_select();
 
     /* Infinite loop */
     /* USER CODE BEGIN WHILE */
@@ -477,28 +692,16 @@ int main(void)
     {
         /* USER CODE END WHILE */
 
-// #if (USB_TEST_ATTACH_DELAY_MS != 0U)
-//         if (!g_usb_init_enabled)
-//         {
-//             uint32_t const now_ms = HAL_GetTick();
-//             if ((now_ms - s_boot_ms) >= (uint32_t)USB_TEST_ATTACH_DELAY_MS)
-//             {
-//                 g_usb_init_enabled = true;
-//             }
-//         }
-// #endif
-
         usb_start_if_enabled();
         if (s_usb_started) {
             tud_task(); // TinyUSB device task
             ups_hid_periodic_task();
 
         }
-        // // Quick test: decay remaining capacity every 30 seconds.
-        // test_decay_remaining_capacity();
-        // test_increase_remaining_capacity(); 
-
-        uart_engine_send_Y_and_print_task();
+        ups_bootstrap_task();
+        ups_dynamic_update_task();
+        ups_debug_status_print_task();
+        ups_led_task();
         uart_engine_tick();
     }
     /* USER CODE END 3 */
@@ -672,6 +875,7 @@ static void MX_GPIO_Init(void)
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Pull = GPIO_PULLDOWN;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+    HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
 
     /*Configure GPIO pins : PA0 PA1 PA4 PA5
                              PA6 PA7 PA8 PA9
