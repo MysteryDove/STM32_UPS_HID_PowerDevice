@@ -13,6 +13,10 @@ extern "C" {
 #define UART_ENGINE_MAX_ENDING_LEN 8U
 #endif
 
+#ifndef UART_ENGINE_INTERJOB_COOLDOWN_MS
+#define UART_ENGINE_INTERJOB_COOLDOWN_MS 15U
+#endif
+
 // Non-blocking UART request engine.
 //
 // - Enqueue requests (cmd 8/16-bit, expected response length) paired with a

@@ -20,7 +20,7 @@
 #include <string.h>
 
 #ifndef UART_ENGINE_QUEUE_SIZE
-#define UART_ENGINE_QUEUE_SIZE 8U
+#define UART_ENGINE_QUEUE_SIZE 32U
 #endif
 
 #ifndef UART_ENGINE_MAX_EXPECTED_LEN
@@ -64,6 +64,9 @@ static uint32_t s_retry_not_before_ms;
 
 static uint8_t s_rx_buf[UART_ENGINE_MAX_EXPECTED_LEN];
 static uint16_t s_rx_got;
+// DMA TX must use storage that outlives job_start_tx(); a stack buffer can be
+// overwritten before transfer completes, corrupting multi-byte commands.
+static uint8_t s_tx_buf[8U];
 
 static bool s_hb_enabled;
 static uart_engine_heartbeat_cfg_t s_hb_cfg;
@@ -72,6 +75,126 @@ static uint8_t s_hb_consecutive_failures;
 static bool s_hb_queued_or_active;
 
 static bool s_enabled;
+
+static void set_not_before_ms(uint32_t candidate_ms)
+{
+    if ((int32_t)(candidate_ms - s_retry_not_before_ms) > 0)
+    {
+        s_retry_not_before_ms = candidate_ms;
+    }
+}
+
+static void apply_interjob_cooldown(uint32_t now_ms)
+{
+#if (UART_ENGINE_INTERJOB_COOLDOWN_MS > 0U)
+    set_not_before_ms(now_ms + UART_ENGINE_INTERJOB_COOLDOWN_MS);
+#else
+    (void)now_ms;
+#endif
+}
+
+static void uart_engine_debug_print_raw_rx(const char *reason, const uint8_t *rx, uint16_t rx_len)
+{
+    if (!g_ups_debug_status_print_enabled)
+    {
+        return;
+    }
+
+    printf("UART_ENG raw rx: %s len=%u",
+           (reason != NULL) ? reason : "unknown",
+           (unsigned int)rx_len);
+
+    if ((rx == NULL) || (rx_len == 0U))
+    {
+        printf(" (empty)\r\n");
+        return;
+    }
+
+    printf(" data=");
+    for (uint16_t i = 0U; i < rx_len; i++)
+    {
+        printf("%02X", rx[i]);
+        if ((uint16_t)(i + 1U) < rx_len)
+        {
+            printf(" ");
+        }
+    }
+    printf("\r\n");
+}
+
+static void uart_engine_debug_print_retry(const uart_engine_job_t *job, const char *reason)
+{
+    if (!g_ups_debug_status_print_enabled || (job == NULL))
+    {
+        return;
+    }
+
+    printf("UART_ENG retry: %s cmd=0x%04X hb=%u retries_left=%u q=%u\r\n",
+           (reason != NULL) ? reason : "unknown",
+           (unsigned int)job->req.cmd,
+           job->is_heartbeat ? 1U : 0U,
+           (unsigned int)job->retries_left,
+           (unsigned int)s_q_count);
+
+    uart_engine_debug_print_raw_rx("retry", s_rx_buf, s_rx_got);
+}
+
+static void uart_engine_debug_print_failure(const uart_engine_job_t *job, const char *reason)
+{
+    if (!g_ups_debug_status_print_enabled || (job == NULL))
+    {
+        return;
+    }
+
+    printf("UART_ENG failure: %s cmd=0x%04X hb=%u retries_left=%u q=%u\r\n",
+           (reason != NULL) ? reason : "unknown",
+           (unsigned int)job->req.cmd,
+           job->is_heartbeat ? 1U : 0U,
+           (unsigned int)job->retries_left,
+           (unsigned int)s_q_count);
+}
+
+static void uart_engine_debug_print_timeout(const uart_engine_job_t *job,
+                                            const char *phase,
+                                            uint32_t elapsed_ms,
+                                            uint32_t timeout_ms)
+{
+    if (!g_ups_debug_status_print_enabled || (job == NULL))
+    {
+        return;
+    }
+
+    printf("UART_ENG timeout: %s cmd=0x%04X hb=%u elapsed=%lu timeout=%lu retries_left=%u\r\n",
+           (phase != NULL) ? phase : "unknown",
+           (unsigned int)job->req.cmd,
+           job->is_heartbeat ? 1U : 0U,
+           (unsigned long)elapsed_ms,
+           (unsigned long)timeout_ms,
+           (unsigned int)job->retries_left);
+}
+
+static void uart_engine_debug_print_enqueue_failure(const char *reason, const uart_engine_request_t *req)
+{
+    if (!g_ups_debug_status_print_enabled)
+    {
+        return;
+    }
+
+    if (req == NULL)
+    {
+        printf("UART_ENG enqueue failure: %s req=null q=%u\r\n",
+               (reason != NULL) ? reason : "unknown",
+               (unsigned int)s_q_count);
+        uart_engine_debug_print_raw_rx("enqueue failure", s_rx_buf, s_rx_got);
+        return;
+    }
+
+    printf("UART_ENG enqueue failure: %s cmd=0x%04X q=%u\r\n",
+           (reason != NULL) ? reason : "unknown",
+           (unsigned int)req->cmd,
+           (unsigned int)s_q_count);
+    uart_engine_debug_print_raw_rx("enqueue failure", s_rx_buf, s_rx_got);
+}
 
 static uint32_t tick_now_ms(void)
 {
@@ -354,15 +477,18 @@ uart_engine_result_t uart_engine_enqueue(const uart_engine_request_t *req)
 {
     if (!s_enabled)
     {
+        uart_engine_debug_print_enqueue_failure("engine disabled", req);
         return UART_ENGINE_ERR_DISABLED;
     }
     if (!request_is_valid(req))
     {
+        uart_engine_debug_print_enqueue_failure("bad request", req);
         return UART_ENGINE_ERR_BAD_PARAM;
     }
 
     if (!queue_push(req, false))
     {
+        uart_engine_debug_print_enqueue_failure("queue full", req);
         return UART_ENGINE_ERR_QUEUE_FULL;
     }
     return UART_ENGINE_OK;
@@ -448,6 +574,11 @@ static void maybe_enqueue_heartbeat(uint32_t now_ms)
 
     if (queue_is_full())
     {
+        if (g_ups_debug_status_print_enabled)
+        {
+            printf("UART_ENG failure: heartbeat enqueue queue full q=%u\r\n",
+                   (unsigned int)s_q_count);
+        }
         return;
     }
 
@@ -465,12 +596,17 @@ static void maybe_enqueue_heartbeat(uint32_t now_ms)
 
 static void job_start_tx(uint32_t now_ms)
 {
-    uint8_t tx_buf[8];
-    uint16_t tx_len = build_cmd_bytes(tx_buf, (uint16_t)sizeof(tx_buf), s_active.req.cmd, s_active.req.cmd_bits);
+    // Build command bytes into persistent buffer for asynchronous DMA send.
+    uint16_t tx_len = build_cmd_bytes(s_tx_buf,
+                                      (uint16_t)sizeof(s_tx_buf),
+                                      s_active.req.cmd,
+                                      s_active.req.cmd_bits);
     if (tx_len == 0U)
     {
         s_state = UART_ENGINE_STATE_IDLE;
+        apply_interjob_cooldown(now_ms);
         UART2_Unlock();
+        uart_engine_debug_print_failure(&s_active, "build tx command bytes failed");
         on_job_final_failure(&s_active);
         if (s_active.is_heartbeat)
         {
@@ -483,7 +619,9 @@ static void job_start_tx(uint32_t now_ms)
     UART2_DiscardBuffered();
     UART2_TxDoneClear();
 
-    HAL_StatusTypeDef st = UART2_SendBytesDMA(tx_buf, tx_len);
+    UPS_DebugPrintTxCommand(s_tx_buf, tx_len);
+
+    HAL_StatusTypeDef st = UART2_SendBytesDMA(s_tx_buf, tx_len);
     if (st == HAL_OK)
     {
         s_state = UART_ENGINE_STATE_TX_WAIT;
@@ -499,10 +637,12 @@ static void job_start_tx(uint32_t now_ms)
         s_active.retries_left--;
         if (queue_push(&s_active.req, s_active.is_heartbeat))
         {
+            uart_engine_debug_print_retry(&s_active, "tx dma start failed");
             s_retry_not_before_ms = now_ms + UART_ENGINE_RETRY_COOLDOWN_MS;
         }
         else
         {
+            uart_engine_debug_print_failure(&s_active, "tx dma start failed and retry enqueue failed");
             on_job_final_failure(&s_active);
             if (s_active.is_heartbeat)
             {
@@ -512,6 +652,7 @@ static void job_start_tx(uint32_t now_ms)
     }
     else
     {
+        uart_engine_debug_print_failure(&s_active, "tx dma start failed no retries left");
         on_job_final_failure(&s_active);
         if (s_active.is_heartbeat)
         {
@@ -520,10 +661,11 @@ static void job_start_tx(uint32_t now_ms)
     }
 
     s_state = UART_ENGINE_STATE_IDLE;
+    apply_interjob_cooldown(now_ms);
     active_clear();
 }
 
-static void job_fail_and_maybe_retry(uint32_t now_ms)
+static void job_fail_and_maybe_retry(uint32_t now_ms, const char *reason)
 {
     UART2_Unlock();
 
@@ -532,10 +674,12 @@ static void job_fail_and_maybe_retry(uint32_t now_ms)
         s_active.retries_left--;
         if (queue_push(&s_active.req, s_active.is_heartbeat))
         {
+            uart_engine_debug_print_retry(&s_active, reason);
             s_retry_not_before_ms = now_ms + UART_ENGINE_RETRY_COOLDOWN_MS;
         }
         else
         {
+            uart_engine_debug_print_failure(&s_active, "retry enqueue failed");
             on_job_final_failure(&s_active);
             if (s_active.is_heartbeat)
             {
@@ -545,6 +689,7 @@ static void job_fail_and_maybe_retry(uint32_t now_ms)
     }
     else
     {
+        uart_engine_debug_print_failure(&s_active, reason);
         on_job_final_failure(&s_active);
         if (s_active.is_heartbeat)
         {
@@ -553,6 +698,7 @@ static void job_fail_and_maybe_retry(uint32_t now_ms)
     }
 
     s_state = UART_ENGINE_STATE_IDLE;
+    apply_interjob_cooldown(now_ms);
     active_clear();
 }
 
@@ -622,7 +768,11 @@ void uart_engine_tick(void)
         }
         else if ((now_ms - s_state_start_ms) >= UART_ENGINE_TX_TIMEOUT_MS)
         {
-            job_fail_and_maybe_retry(now_ms);
+            uart_engine_debug_print_timeout(&s_active,
+                                            "tx wait",
+                                            (uint32_t)(now_ms - s_state_start_ms),
+                                            UART_ENGINE_TX_TIMEOUT_MS);
+            job_fail_and_maybe_retry(now_ms, "tx timeout");
         }
         break;
 
@@ -652,7 +802,8 @@ void uart_engine_tick(void)
 
             if (s_rx_got >= rx_cap)
             {
-                job_fail_and_maybe_retry(now_ms);
+                uart_engine_debug_print_failure(&s_active, "rx reached cap before ending");
+                job_fail_and_maybe_retry(now_ms, "rx ending not found");
                 break;
             }
         }
@@ -664,7 +815,11 @@ void uart_engine_tick(void)
 
         if ((now_ms - s_state_start_ms) >= s_active.req.timeout_ms)
         {
-            job_fail_and_maybe_retry(now_ms);
+            uart_engine_debug_print_timeout(&s_active,
+                                            "rx wait",
+                                            (uint32_t)(now_ms - s_state_start_ms),
+                                            s_active.req.timeout_ms);
+            job_fail_and_maybe_retry(now_ms, "rx timeout");
         }
         break;
     }
@@ -687,20 +842,24 @@ void uart_engine_tick(void)
                 s_hb_queued_or_active = false;
             }
             s_state = UART_ENGINE_STATE_IDLE;
+            apply_interjob_cooldown(now_ms);
             active_clear();
             return;
         }
 
         // Parse failed.
+        uart_engine_debug_print_raw_rx("process callback returned false", s_rx_buf, s_rx_got);
         if (s_active.retries_left > 0U)
         {
             s_active.retries_left--;
             if (queue_push(&s_active.req, s_active.is_heartbeat))
             {
+                uart_engine_debug_print_retry(&s_active, "process callback returned false");
                 s_retry_not_before_ms = now_ms + UART_ENGINE_RETRY_COOLDOWN_MS;
             }
             else
             {
+                uart_engine_debug_print_failure(&s_active, "parse failed and retry enqueue failed");
                 on_job_final_failure(&s_active);
                 if (s_active.is_heartbeat)
                 {
@@ -710,6 +869,7 @@ void uart_engine_tick(void)
         }
         else
         {
+            uart_engine_debug_print_failure(&s_active, "process callback returned false");
             on_job_final_failure(&s_active);
             if (s_active.is_heartbeat)
             {
@@ -718,6 +878,7 @@ void uart_engine_tick(void)
         }
 
         s_state = UART_ENGINE_STATE_IDLE;
+        apply_interjob_cooldown(now_ms);
         active_clear();
         break;
     }

@@ -11,7 +11,7 @@
 #include <string.h>
 
 #define SPM2K_CMD_LINE_TIMEOUT_MS 500U
-#define SPM2K_CMD_LINE_RETRIES 2U
+#define SPM2K_CMD_LINE_RETRIES 0U
 #define SPM2K_LINE_MAX_LEN 40U
 
 static bool spm2k_rx_has_crlf(const uint8_t *rx, uint16_t rx_len);
@@ -20,6 +20,7 @@ static bool spm2k_extract_text(const uint8_t *rx,
                                bool require_crlf,
                                char *out,
                                size_t out_size);
+static bool spm2k_text_is_na(const char *text);
 static bool spm2k_parse_scaled_int(const char *text,
                                    int32_t scale,
                                    int32_t min_value,
@@ -46,6 +47,7 @@ const uart_engine_request_t g_spm2k_constant_lut[] = {
 const size_t g_spm2k_constant_lut_count = sizeof(g_spm2k_constant_lut) / sizeof(g_spm2k_constant_lut[0]);
 
 const uart_engine_request_t g_spm2k_dynamic_lut[] = {
+    { .out_value = NULL, .cmd = (uint16_t)0x59U, .cmd_bits = 8U, .expected_len = 4U, .expected_ending = false, .expected_ending_len = 0U, .expected_ending_bytes = {0}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = NULL },
     { .out_value = &g_battery.battery_voltage, .cmd = (uint16_t)0x42U, .cmd_bits = 8U, .expected_len = 16U, .expected_ending = true, .expected_ending_len = 2U, .expected_ending_bytes = {0x0DU, 0x0AU}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = spm2k_process_voltage },
     { .out_value = &g_battery.battery_current, .cmd = (uint16_t)0x9FD4U, .cmd_bits = 16U, .expected_len = 16U, .expected_ending = true, .expected_ending_len = 2U, .expected_ending_bytes = {0x0DU, 0x0AU}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = spm2k_process_bat_current },
     { .out_value = &g_battery.run_time_to_empty_s, .cmd = (uint16_t)0x6AU, .cmd_bits = 8U, .expected_len = 16U, .expected_ending = true, .expected_ending_len = 2U, .expected_ending_bytes = {0x0DU, 0x0AU}, .timeout_ms = SPM2K_CMD_LINE_TIMEOUT_MS, .max_retries = SPM2K_CMD_LINE_RETRIES, .process_fn = spm2k_process_runtime_minutes_to_seconds },
@@ -80,6 +82,25 @@ static bool spm2k_rx_has_crlf(const uint8_t *rx, uint16_t rx_len)
     }
 
     return (rx[rx_len - 2U] == 0x0DU) && (rx[rx_len - 1U] == 0x0AU);
+}
+
+// Some UPS replies "NA"/"N/A" when a metric is temporarily unavailable.
+static bool spm2k_text_is_na(const char *text)
+{
+    if (text == NULL)
+    {
+        return false;
+    }
+
+    bool const n = (text[0] == 'N') || (text[0] == 'n');
+    bool const a = (text[1] == 'A') || (text[1] == 'a');
+
+    if (n && a && (text[2] == '\0'))
+    {
+        return true;
+    }
+
+    return n && (text[1] == '/') && ((text[2] == 'A') || (text[2] == 'a')) && (text[3] == '\0');
 }
 
 static bool spm2k_extract_text(const uint8_t *rx,
@@ -393,8 +414,17 @@ bool spm2k_process_voltage(uint16_t cmd, const uint8_t *rx, uint16_t rx_len, voi
 
     char text[16];
     int32_t parsed = 0;
-    if (!spm2k_extract_text(rx, rx_len, true, text, sizeof(text)) ||
-        !spm2k_parse_scaled_int(text, 100, 0, UINT16_MAX, &parsed))
+    if (!spm2k_extract_text(rx, rx_len, true, text, sizeof(text)))
+    {
+        return false;
+    }
+
+    if (spm2k_text_is_na(text))
+    {
+        return true;
+    }
+
+    if (!spm2k_parse_scaled_int(text, 100, 0, UINT16_MAX, &parsed))
     {
         return false;
     }
@@ -414,8 +444,17 @@ bool spm2k_process_frequency(uint16_t cmd, const uint8_t *rx, uint16_t rx_len, v
 
     char text[16];
     int32_t parsed = 0;
-    if (!spm2k_extract_text(rx, rx_len, true, text, sizeof(text)) ||
-        !spm2k_parse_scaled_int(text, 100, 0, UINT16_MAX, &parsed))
+    if (!spm2k_extract_text(rx, rx_len, true, text, sizeof(text)))
+    {
+        return false;
+    }
+
+    if (spm2k_text_is_na(text))
+    {
+        return true;
+    }
+
+    if (!spm2k_parse_scaled_int(text, 100, 0, UINT16_MAX, &parsed))
     {
         return false;
     }
@@ -616,8 +655,17 @@ bool spm2k_process_bat_current(uint16_t cmd, const uint8_t *rx, uint16_t rx_len,
 
     char text[16];
     int32_t parsed = 0;
-    if (!spm2k_extract_text(rx, rx_len, true, text, sizeof(text)) ||
-        !spm2k_parse_scaled_int(text, 100, INT16_MIN, INT16_MAX, &parsed))
+    if (!spm2k_extract_text(rx, rx_len, true, text, sizeof(text)))
+    {
+        return false;
+    }
+
+    if (spm2k_text_is_na(text))
+    {
+        return true;
+    }
+
+    if (!spm2k_parse_scaled_int(text, 100, INT16_MIN, INT16_MAX, &parsed))
     {
         return false;
     }

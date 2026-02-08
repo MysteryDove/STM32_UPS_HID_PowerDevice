@@ -86,7 +86,7 @@ static bool s_usb_started = false;
 #endif
 
 #ifndef UPS_DYNAMIC_UPDATE_PERIOD_S
-#define UPS_DYNAMIC_UPDATE_PERIOD_S 5U
+#define UPS_DYNAMIC_UPDATE_PERIOD_S 10U
 #endif
 
 #ifndef UPS_INIT_RETRY_PERIOD_S
@@ -114,9 +114,35 @@ static bool s_usb_started = false;
 
 #if (UPS_DEBUG_STATUS_PRINT_ENABLED != 0)
 #define UPS_DEBUG_PRINTF(...) printf(__VA_ARGS__)
+const bool g_ups_debug_status_print_enabled = true;
 #else
 #define UPS_DEBUG_PRINTF(...)
+const bool g_ups_debug_status_print_enabled = false;
 #endif
+
+void UPS_DebugPrintTxCommand(const uint8_t *data, uint16_t len)
+{
+#if (UPS_DEBUG_STATUS_PRINT_ENABLED != 0)
+    if ((data == NULL) || (len < 1U))
+    {
+        return;
+    }
+
+    printf("UART_TX cmd len=%u data=", (unsigned int)len);
+    for (uint16_t i = 0U; i < len; i++)
+    {
+        printf("%02X", data[i]);
+        if ((uint16_t)(i + 1U) < len)
+        {
+            printf(" ");
+        }
+    }
+    printf("\r\n");
+#else
+    (void)data;
+    (void)len;
+#endif
+}
 
 static bool s_usb_dp_held_low = false;
 

@@ -49,7 +49,9 @@ This project uses **TinyUSB** for the USB device stack and STM32Cube HAL for the
 - run a sanity check (`g_battery.remaining_capacity > 0`) before enabling USB
 - retry bootstrap after a cooldown if heartbeat/sanity fails
 
-After bootstrap succeeds, dynamic telemetry refresh runs periodically (default `UPS_DYNAMIC_UPDATE_PERIOD_S = 5` seconds).
+After bootstrap succeeds, dynamic telemetry refresh runs periodically (default `UPS_DYNAMIC_UPDATE_PERIOD_S = 10` seconds).
+
+Each dynamic refresh cycle now starts with a lightweight SPM2K liveness query (`'Y'`, expecting `"SM\\r\\n"`) before telemetry fields are polled.
 
 `src/spm2k.c` provides command LUTs and parsing callbacks for common UPS fields (voltage/current/frequency/load/runtime/temperature/status/date/string metadata), and now also exposes a dedicated heartbeat request definition.
 
@@ -185,9 +187,13 @@ Non-blocking UART polling engine.
 
 - Handles retries and a short cooldown between retries
 
+- Adds a configurable inter-job pacing gap (`UART_ENGINE_INTERJOB_COOLDOWN_MS`, default 15 ms)
+
 - Optional "heartbeat" scheduling (`uart_engine_set_heartbeat()`); after N consecutive failures it forces some battery fields to 0 as a safety/fail indication
 
 - Exposes `uart_engine_is_busy()` so upper-layer scheduling can know when queue/active work has drained
+
+- Includes richer debug diagnostics (TX command bytes, enqueue/retry/failure/timeout logs, and raw RX dump on parse/enqueue failures) when debug printing is enabled in `main.c`
 
   
 
@@ -212,6 +218,8 @@ Application orchestration and runtime flow (inside USER CODE regions):
 - Schedules periodic dynamic refresh cycles
 
 - Provides optional UART debug status prints and LED busy blinking while UART engine is active
+
+- Exposes a global debug gate (`g_ups_debug_status_print_enabled`) and TX logging helper (`UPS_DebugPrintTxCommand()`), used by the UART engine debug output path
 
   
 
@@ -291,7 +299,11 @@ This module now provides:
 
 - Heartbeat request definition and expected response bytes (`g_spm2k_constant_heartbeat`, `g_spm2k_constant_heartbeat_expect_return`)
 
+- Dynamic LUT includes an explicit periodic `'Y'` liveness query
+
 - parsing helpers that validate ASCII/CSV/hex formats and write converted values into HID state fields
+
+- Accepts `NA` / `N/A` for selected numeric fields (e.g. some voltage/frequency/current replies) and keeps prior values instead of failing the whole update
 
 - command-aware string parsing that can update USB product/serial strings via `usb_desc_set_string_ascii()`
 
