@@ -20,7 +20,6 @@ static bool spm2k_extract_text(const uint8_t *rx,
                                bool require_crlf,
                                char *out,
                                size_t out_size);
-static bool spm2k_text_is_na(const char *text);
 static bool spm2k_parse_scaled_int(const char *text,
                                    int32_t scale,
                                    int32_t min_value,
@@ -82,25 +81,6 @@ static bool spm2k_rx_has_crlf(const uint8_t *rx, uint16_t rx_len)
     }
 
     return (rx[rx_len - 2U] == 0x0DU) && (rx[rx_len - 1U] == 0x0AU);
-}
-
-// Some UPS replies "NA"/"N/A" when a metric is temporarily unavailable.
-static bool spm2k_text_is_na(const char *text)
-{
-    if (text == NULL)
-    {
-        return false;
-    }
-
-    bool const n = (text[0] == 'N') || (text[0] == 'n');
-    bool const a = (text[1] == 'A') || (text[1] == 'a');
-
-    if (n && a && (text[2] == '\0'))
-    {
-        return true;
-    }
-
-    return n && (text[1] == '/') && ((text[2] == 'A') || (text[2] == 'a')) && (text[3] == '\0');
 }
 
 static bool spm2k_extract_text(const uint8_t *rx,
@@ -419,11 +399,6 @@ bool spm2k_process_voltage(uint16_t cmd, const uint8_t *rx, uint16_t rx_len, voi
         return false;
     }
 
-    if (spm2k_text_is_na(text))
-    {
-        return true;
-    }
-
     if (!spm2k_parse_scaled_int(text, 100, 0, UINT16_MAX, &parsed))
     {
         return false;
@@ -447,11 +422,6 @@ bool spm2k_process_frequency(uint16_t cmd, const uint8_t *rx, uint16_t rx_len, v
     if (!spm2k_extract_text(rx, rx_len, true, text, sizeof(text)))
     {
         return false;
-    }
-
-    if (spm2k_text_is_na(text))
-    {
-        return true;
     }
 
     if (!spm2k_parse_scaled_int(text, 100, 0, UINT16_MAX, &parsed))
@@ -658,11 +628,6 @@ bool spm2k_process_bat_current(uint16_t cmd, const uint8_t *rx, uint16_t rx_len,
     if (!spm2k_extract_text(rx, rx_len, true, text, sizeof(text)))
     {
         return false;
-    }
-
-    if (spm2k_text_is_na(text))
-    {
-        return true;
     }
 
     if (!spm2k_parse_scaled_int(text, 100, INT16_MIN, INT16_MAX, &parsed))
