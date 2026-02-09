@@ -365,7 +365,7 @@ static void on_job_success(const uart_engine_job_t *job)
 
 static void on_job_final_failure(const uart_engine_job_t *job)
 {
-    if ((job != NULL) && job->is_heartbeat)
+    if ((job != NULL))
     {
         if (s_hb_consecutive_failures < 255U)
         {
@@ -380,8 +380,14 @@ static void on_job_final_failure(const uart_engine_job_t *job)
 
         if (s_hb_consecutive_failures >= threshold)
         {
-            g_battery.remaining_capacity = 0U;
-            g_battery.remaining_time_limit_s = 0U;
+            g_battery.remaining_capacity = 1U;
+            g_battery.remaining_time_limit_s = 1U;
+            g_power_summary_present_status.fully_charged = false;
+            g_power_summary_present_status.below_remaining_capacity_limit = true;
+            g_power_summary_present_status.shutdown_imminent = true;
+            g_power_summary_present_status.charging = false;
+            g_power_summary_present_status.discharging = true;
+            g_power_summary_present_status.ac_present = false;
         }
     }
 }
