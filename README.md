@@ -39,14 +39,21 @@ Please notice the EDA project is also under GPL-3.0 License, so if you want to u
 
 ## Current status (important)
 
-Everything should work fine now and code development is kinda done. I draw a pcb board using easyEDA and the project file can be found in the repo now. The board is not validated yet.
+- Everything should work fine now and code development is kinda done. I draw a pcb board using easyEDA and the project file can be found in the repo now. The board is not validated yet.
 
-For Windows Support, system level warning is triggered by `g_power_summary.warning_capacity_limit` and force shutdown is triggered by `g_power_summary.remaining_capacity_limit`; no charging icon will show if there is no current under power summary.
+- For Windows Support, system level warning is triggered by `g_power_summary.warning_capacity_limit` and force shutdown is triggered by `g_power_summary.remaining_capacity_limit`; no charging icon will show if there is no current under power summary.
 
-USB startup is now gated in `main.c` by `g_usb_init_enabled` (default `false`). On Blue Pill boards with a fixed D+ pull-up, firmware can hold PA12 low until USB start to avoid early host attach detection.
+- USB startup is now gated in `main.c` by `g_usb_init_enabled` (default `false`). On Blue Pill boards with a fixed D+ pull-up, firmware can hold PA12 low until USB start to avoid early host attach detection.
 
-UPS state defaults in `main.c` are now zeroed at boot and become valid after successful UART bootstrap.
+- UPS state defaults in `main.c` are now zeroed at boot and become valid after successful UART bootstrap.
 
+
+
+## Known Issues
+
+- Under Linux NUT, because the apc-hid sub-driver have a flag ST_FLAG_STRING on `battery.runtime.low` `input.transfer.low` `input.transfer.high` the current reading of these values from nut will be very strange single digit number. Further investigation is needed to see if it's possible to make it working.
+
+- No watchdog for stm32 system now, if the stm32 system hangs for some reason, it will not recover itself. Adding a watchdog is possible but need more work to be done.
 
 ## Hardware
 
