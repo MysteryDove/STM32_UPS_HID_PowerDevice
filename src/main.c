@@ -50,6 +50,7 @@
 /* Private variables ---------------------------------------------------------*/
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
+IWDG_HandleTypeDef hiwdg;
 
 PCD_HandleTypeDef hpcd_USB_FS;
 
@@ -62,6 +63,7 @@ static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_USB_PCD_Init(void);
+static void MX_IWDG_Init(void);
 /* USER CODE BEGIN PFP */
 /* USER CODE END PFP */
 
@@ -94,7 +96,7 @@ static bool s_usb_started = false;
 #endif
 
 #ifndef UPS_DEBUG_STATUS_PRINT_ENABLED
-#define UPS_DEBUG_STATUS_PRINT_ENABLED 1
+#define UPS_DEBUG_STATUS_PRINT_ENABLED 0
 #endif
 
 #ifndef UPS_DEBUG_STATUS_PRINT_PERIOD_MS
@@ -109,6 +111,18 @@ static bool s_usb_started = false;
 #define UPS_BOOTSTRAP_HEARTBEAT_RX_BUF_SIZE 16U
 #endif
 
+#ifndef UPS_IWDG_ENABLED
+#define UPS_IWDG_ENABLED 1
+#endif
+
+#ifndef UPS_IWDG_TIMEOUT_MS
+#define UPS_IWDG_TIMEOUT_MS 8000U
+#endif
+
+#ifndef UPS_IDLE_SLEEP_ENABLED
+#define UPS_IDLE_SLEEP_ENABLED 1
+#endif
+
 #define UPS_DYNAMIC_UPDATE_PERIOD_MS ((uint32_t)(UPS_DYNAMIC_UPDATE_PERIOD_S) * 1000U)
 #define UPS_INIT_RETRY_PERIOD_MS ((uint32_t)(UPS_INIT_RETRY_PERIOD_S) * 1000U)
 
@@ -119,6 +133,80 @@ const bool g_ups_debug_status_print_enabled = true;
 #define UPS_DEBUG_PRINTF(...)
 const bool g_ups_debug_status_print_enabled = false;
 #endif
+
+typedef struct
+{
+    uint32_t hal_prescaler;
+    uint32_t divider;
+} iwdg_prescaler_option_t;
+
+static void iwdg_compute_config(uint32_t timeout_ms,
+                                uint32_t *out_prescaler,
+                                uint32_t *out_reload)
+{
+    static const iwdg_prescaler_option_t k_prescaler_options[] = {
+        {IWDG_PRESCALER_4, 4U},
+        {IWDG_PRESCALER_8, 8U},
+        {IWDG_PRESCALER_16, 16U},
+        {IWDG_PRESCALER_32, 32U},
+        {IWDG_PRESCALER_64, 64U},
+        {IWDG_PRESCALER_128, 128U},
+        {IWDG_PRESCALER_256, 256U},
+    };
+
+    uint32_t chosen_hal_prescaler = IWDG_PRESCALER_256;
+    uint32_t chosen_reload = 4095U;
+    bool found = false;
+
+    if (timeout_ms == 0U)
+    {
+        timeout_ms = 1U;
+    }
+
+    for (size_t i = 0U; i < (sizeof(k_prescaler_options) / sizeof(k_prescaler_options[0])); i++)
+    {
+        uint32_t const divider = k_prescaler_options[i].divider;
+        uint64_t const numerator = ((uint64_t)timeout_ms * (uint64_t)LSI_VALUE) +
+                                   ((uint64_t)divider * 1000ULL) - 1ULL;
+        uint32_t ticks = (uint32_t)(numerator / ((uint64_t)divider * 1000ULL));
+
+        if (ticks == 0U)
+        {
+            ticks = 1U;
+        }
+
+        if (ticks <= 4096U)
+        {
+            chosen_hal_prescaler = k_prescaler_options[i].hal_prescaler;
+            chosen_reload = ticks - 1U;
+            found = true;
+            break;
+        }
+    }
+
+    if (!found)
+    {
+        chosen_hal_prescaler = IWDG_PRESCALER_256;
+        chosen_reload = 4095U;
+    }
+
+    *out_prescaler = chosen_hal_prescaler;
+    *out_reload = chosen_reload;
+}
+
+static void watchdog_refresh(void)
+{
+#if (UPS_IWDG_ENABLED != 0)
+    (void)HAL_IWDG_Refresh(&hiwdg);
+#endif
+}
+
+static void ups_idle_sleep(void)
+{
+#if (UPS_IDLE_SLEEP_ENABLED != 0)
+    HAL_PWR_EnterSLEEPMode(PWR_MAINREGULATOR_ON, PWR_SLEEPENTRY_WFI);
+#endif
+}
 
 void UPS_DebugPrintTxCommand(const uint8_t *data, uint16_t len)
 {
@@ -711,6 +799,7 @@ int main(void)
     uart_engine_init();
     uart_engine_set_enabled(s_uart_engine_enabled);
     ups_sub_adapter_select();
+    MX_IWDG_Init();
 
     /* Infinite loop */
     /* USER CODE BEGIN WHILE */
@@ -729,6 +818,8 @@ int main(void)
         ups_debug_status_print_task();
         ups_led_task();
         uart_engine_tick();
+        watchdog_refresh();
+        ups_idle_sleep();
     }
     /* USER CODE END 3 */
 }
@@ -875,6 +966,30 @@ static void MX_USB_PCD_Init(void)
 }
 
 /**
+ * @brief IWDG Initialization Function
+ * @param None
+ * @retval None
+ */
+static void MX_IWDG_Init(void)
+{
+#if (UPS_IWDG_ENABLED != 0)
+    uint32_t iwdg_prescaler = IWDG_PRESCALER_256;
+    uint32_t iwdg_reload = 4095U;
+
+    iwdg_compute_config(UPS_IWDG_TIMEOUT_MS, &iwdg_prescaler, &iwdg_reload);
+
+    hiwdg.Instance = IWDG;
+    hiwdg.Init.Prescaler = iwdg_prescaler;
+    hiwdg.Init.Reload = iwdg_reload;
+
+    if (HAL_IWDG_Init(&hiwdg) != HAL_OK)
+    {
+        Error_Handler();
+    }
+#endif
+}
+
+/**
  * @brief GPIO Initialization Function
  * @param None
  * @retval None
@@ -936,6 +1051,7 @@ void Error_Handler(void)
     /* USER CODE BEGIN Error_Handler_Debug */
     /* User can add his own implementation to report the HAL error return state */
     __disable_irq();
+    NVIC_SystemReset();
     while (1)
     {
     }

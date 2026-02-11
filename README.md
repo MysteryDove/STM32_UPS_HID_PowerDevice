@@ -47,13 +47,15 @@ Please notice the EDA project is also under GPL-3.0 License, so if you want to u
 
 - UPS state defaults in `main.c` are now zeroed at boot and become valid after successful UART bootstrap.
 
+- Fault handlers and `Error_Handler()` now use fail-fast reset (`NVIC_SystemReset`) instead of hanging forever.
+
+- IWDG watchdog is enabled by default (configurable via `UPS_IWDG_ENABLED` / `UPS_IWDG_TIMEOUT_MS` in `src/main.c`, default timeout: 8000 ms).
+
 
 
 ## Known Issues
 
 - Under Linux NUT, because the apc-hid sub-driver have a flag ST_FLAG_STRING on `battery.runtime.low` `input.transfer.low` `input.transfer.high` the current reading of these values from nut will be very strange single digit number. Further investigation is needed to see if it's possible to make it working.
-
-- No watchdog for stm32 system now, if the stm32 system hangs for some reason, it will not recover itself. Adding a watchdog is possible but need more work to be done.
 
 ## Hardware
 
