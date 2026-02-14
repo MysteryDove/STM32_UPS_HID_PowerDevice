@@ -23,23 +23,17 @@ Please notice the EDA project is also under GPL-3.0 License, so if you want to u
 
 ## What you get
 
-  
 
-- USB HID **Power Device / UPS** report descriptor (Power Summary + Input + Output + Battery)
+- USB HID **Power Device / UPS** device simulator (single configuration, single interface)
 
-- HID **GET_REPORT** callbacks for both **Input** and **Feature** reports
-
-- A small **UART2 adapter** (DMA TX + interrupt RX ring buffer)
-
-- A **non-blocking UART request engine** (queue + retries + optional heartbeat monitoring)
+- A small **UART2 adapter** (DMA TX + interrupt RX ring buffer) with UART engine on top
 
 - A protocol parser module for **SPM2K/APC-style serial responses** (`src/spm2k.c`) that provides LUT-based request definitions and value parsers
-
   
 
-## Current status (important)
+## Note from development
 
-- Everything should work fine now and code development is kinda done. I draw a pcb board using easyEDA and the project file can be found in the repo now. The board is not validated yet.
+- PCB design is verified with two version, one using smd oscillator completely and add test pad for firmware download, the other one is the original design with through hole oscillator. 
 
 - For Windows Support, system level warning is triggered by `g_power_summary.warning_capacity_limit` and force shutdown is triggered by `g_power_summary.remaining_capacity_limit`; no charging icon will show if there is no current under power summary.
 
@@ -51,7 +45,9 @@ Please notice the EDA project is also under GPL-3.0 License, so if you want to u
 
 - IWDG watchdog is enabled by default (configurable via `UPS_IWDG_ENABLED` / `UPS_IWDG_TIMEOUT_MS` in `src/main.c`, default timeout: 8000 ms).
 
+## TODO
 
+- Build a 3d-printed enclosure
 
 ## Known Issues
 
@@ -62,24 +58,19 @@ Please notice the EDA project is also under GPL-3.0 License, so if you want to u
 
 Target board: STM32F103C8 (48 MHz PLL in current config).
 
-  
-
 Typical connections:
-
   
 
 - USB FS: PA11 (DM), PA12 (DP)
 
 - UART2 (TTL level): PA2 (TX), PA3 (RX)
 
-- UART1 (debug to get all print message with baudrate 115200): PA9
+- UART1 (debug to get all print message with baudrate 115200, only tx is used): PA9
 
 - If your UPS is true RS-232 voltage levels, use a level shifter/transceiver (e.g. MAX3232).
 
   
-
 UART2 defaults to **2400 8N1** (see `MX_USART2_UART_Init()` in `src/main.c`).
-
   
 
 ## Build & flash (PlatformIO)
@@ -274,16 +265,12 @@ String descriptors are now backed by mutable buffers and can be read/updated at 
 
 ### `src/spm2k.c`
 
-  
 
-SPM2K/APC protocol request definitions and response parsers.
+SPM Series UPS/APC protocol request definitions and response parsers.
 
-  
 
 This module now provides:
-
   
-
 - LUTs for "constant" and "dynamic" UPS query sets (`g_spm2k_constant_lut`, `g_spm2k_dynamic_lut`)
 
 - Heartbeat request definition and expected response bytes (`g_spm2k_constant_heartbeat`, `g_spm2k_constant_heartbeat_expect_return`)
@@ -291,8 +278,6 @@ This module now provides:
 - Dynamic LUT includes an explicit periodic `'Y'` liveness query
 
 - parsing helpers that validate ASCII/CSV/hex formats and write converted values into HID state fields
-
-- Accepts `NA` / `N/A` for selected numeric fields (e.g. some voltage/frequency/current replies) and keeps prior values instead of failing the whole update
 
 - command-aware string parsing that can update USB product/serial strings via `usb_desc_set_string_ascii()`
 
