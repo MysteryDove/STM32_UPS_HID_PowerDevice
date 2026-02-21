@@ -1,9 +1,7 @@
 
-  
+![board](board.png)
 
 # STM32 UPS HID Power Device (APC RS232 → USB HID)
-
-  
 
 Firmware for an STM32F103 ("Blue Pill" / genericSTM32F103C8) that exposes a **USB HID Power Device (UPS)** interface.
 
@@ -34,6 +32,8 @@ Please notice the EDA project is also under GPL-3.0 License, so if you want to u
 ## Note from development
 
 - PCB design is verified with two version, one using smd oscillator completely and add test pad for firmware download, the other one is the original design with through hole oscillator. 
+
+- Depending on UPS serial wiring (DTE/DCE pairing), a null-modem adapter may be required between the UPS and converter.
 
 - For Windows Support, system level warning is triggered by `g_power_summary.warning_capacity_limit` and force shutdown is triggered by `g_power_summary.remaining_capacity_limit`; no charging icon will show if there is no current under power summary.
 
