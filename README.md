@@ -121,7 +121,32 @@ Note: the USB VID/PID are defined in `src/usb_descriptors.c`. If you change them
 
   
 
-## Source guide: project-specific .c files
+## USB capture payload extraction (Windows)
+
+`pcapanalyze.py` is a helper script that uses `tshark` to extract USB payload bytes from a `.pcap`/`.pcapng` capture and print merged traffic lines as:
+
+- `Send: ASCII (HEX)`
+
+- `Receive: ASCII (HEX)`
+
+It is useful for checking UPS UART-over-USB traffic from Wireshark captures.
+
+Examples:
+
+- Analyze a capture with the default display filter (`(usb.data_len > 0) && (usbcom || usb.capdata)`):
+
+- `python .\pcapanalyze.py .\capture.pcapng`
+
+- Show frame numbers:
+
+- `python .\pcapanalyze.py .\capture.pcapng --show-frame`
+
+- Override `tshark` path explicitly:
+
+- `python .\pcapanalyze.py .\capture.pcapng --tshark "C:\Program Files\Wireshark\tshark.exe"`
+
+If `tshark` is not in `PATH`, install Wireshark (or CLI tools) and/or pass `--tshark`.
+
 
   
 

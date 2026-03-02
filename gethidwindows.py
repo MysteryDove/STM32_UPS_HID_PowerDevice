@@ -302,6 +302,19 @@ class HIDP_BUTTON_CAPS(ctypes.Structure):
 	]
 
 
+class HIDP_LINK_COLLECTION_NODE(ctypes.Structure):
+	_fields_ = [
+		("LinkUsage", wintypes.USHORT),
+		("LinkUsagePage", wintypes.USHORT),
+		("Parent", wintypes.USHORT),
+		("NumberOfChildren", wintypes.USHORT),
+		("NextSibling", wintypes.USHORT),
+		("FirstChild", wintypes.USHORT),
+		("CollectionTypeAndFlags", wintypes.ULONG),
+		("UserContext", ULONG_PTR),
+	]
+
+
 PHIDP_PREPARSED_DATA = wintypes.LPVOID
 
 hid.HidD_GetPreparsedData.argtypes = [wintypes.HANDLE, ctypes.POINTER(PHIDP_PREPARSED_DATA)]
@@ -364,6 +377,13 @@ hid.HidP_GetUsages.argtypes = [
 	wintypes.ULONG,
 ]
 hid.HidP_GetUsages.restype = wintypes.ULONG
+
+hid.HidP_GetLinkCollectionNodes.argtypes = [
+	ctypes.POINTER(HIDP_LINK_COLLECTION_NODE),
+	ctypes.POINTER(wintypes.ULONG),
+	PHIDP_PREPARSED_DATA,
+]
+hid.HidP_GetLinkCollectionNodes.restype = wintypes.ULONG
 
 
 kernel32.CreateFileW.argtypes = [
@@ -549,6 +569,7 @@ def _dump_value_caps(
 	preparsed: PHIDP_PREPARSED_DATA,
 	report_type: int,
 	count: int,
+	link_paths: dict[int, str] | None = None,
 	report_ids: set[int] | None = None,
 ) -> None:
 	if count <= 0:
@@ -568,16 +589,20 @@ def _dump_value_caps(
 		if vc.IsRange:
 			usage = f"0x{vc.Range.UsageMin:04X}-0x{vc.Range.UsageMax:04X}"
 			data_index = f"{vc.Range.DataIndexMin}-{vc.Range.DataIndexMax}"
+			usage_desc = usage
 		else:
 			usage = f"0x{vc.NotRange.Usage:04X}"
 			data_index = f"{vc.NotRange.DataIndex}"
-		if vc.IsRange:
-			usage_desc = usage
-		else:
-			usage_desc = _fmt_usage(int(vc.UsagePage), int(vc.NotRange.Usage)).replace("UsagePage=", "").replace(" Usage=", " ")
+			usage_desc = _fmt_usage_with_link_path(
+				int(vc.UsagePage),
+				int(vc.NotRange.Usage),
+				int(vc.LinkCollection),
+				link_paths,
+			)
 		print(
 			"    "
 			f"UsagePage=0x{vc.UsagePage:04X} Usage={usage_desc} ReportID={vc.ReportID} "
+			f"LinkCollection={int(vc.LinkCollection)} "
 			f"BitSize={vc.BitSize} ReportCount={vc.ReportCount} DataIndex={data_index} "
 			f"Logical=[{vc.LogicalMin},{vc.LogicalMax}] Physical=[{vc.PhysicalMin},{vc.PhysicalMax}] "
 			f"Abs={int(vc.IsAbsolute)} Null={int(vc.HasNull)}"
@@ -599,6 +624,7 @@ def _dump_button_caps(
 	preparsed: PHIDP_PREPARSED_DATA,
 	report_type: int,
 	count: int,
+	link_paths: dict[int, str] | None = None,
 	report_ids: set[int] | None = None,
 ) -> None:
 	if count <= 0:
@@ -618,16 +644,20 @@ def _dump_button_caps(
 		if bc.IsRange:
 			usage = f"0x{bc.Range.UsageMin:04X}-0x{bc.Range.UsageMax:04X}"
 			data_index = f"{bc.Range.DataIndexMin}-{bc.Range.DataIndexMax}"
+			usage_desc = usage
 		else:
 			usage = f"0x{bc.NotRange.Usage:04X}"
 			data_index = f"{bc.NotRange.DataIndex}"
-		if bc.IsRange:
-			usage_desc = usage
-		else:
-			usage_desc = _fmt_usage(int(bc.UsagePage), int(bc.NotRange.Usage)).replace("UsagePage=", "").replace(" Usage=", " ")
+			usage_desc = _fmt_usage_with_link_path(
+				int(bc.UsagePage),
+				int(bc.NotRange.Usage),
+				int(bc.LinkCollection),
+				link_paths,
+			)
 		print(
 			"    "
-			f"UsagePage=0x{bc.UsagePage:04X} Usage={usage_desc} ReportID={bc.ReportID} DataIndex={data_index}"
+			f"UsagePage=0x{bc.UsagePage:04X} Usage={usage_desc} ReportID={bc.ReportID} "
+			f"LinkCollection={int(bc.LinkCollection)} DataIndex={data_index}"
 		)
 
 
@@ -646,6 +676,7 @@ def _get_button_caps(preparsed: PHIDP_PREPARSED_DATA, report_type: int, count: i
 def dump_report_mapping(preparsed: PHIDP_PREPARSED_DATA, caps: HIDP_CAPS) -> tuple[set[int], set[int]]:
 	input_report_ids: set[int] = set()
 	feature_report_ids: set[int] = set()
+	link_paths = _get_link_collection_paths(preparsed, caps)
 	print("HID Report Mapping (from hid.dll parser)")
 	print(
 		f"  TopLevel UsagePage=0x{caps.UsagePage:04X} Usage=0x{caps.Usage:04X} "
@@ -653,16 +684,16 @@ def dump_report_mapping(preparsed: PHIDP_PREPARSED_DATA, caps: HIDP_CAPS) -> tup
 	)
 
 	print(" Input:")
-	_dump_button_caps(preparsed, HidP_Input, caps.NumberInputButtonCaps, input_report_ids)
-	_dump_value_caps(preparsed, HidP_Input, caps.NumberInputValueCaps, input_report_ids)
+	_dump_button_caps(preparsed, HidP_Input, caps.NumberInputButtonCaps, link_paths, input_report_ids)
+	_dump_value_caps(preparsed, HidP_Input, caps.NumberInputValueCaps, link_paths, input_report_ids)
 
 	print(" Output:")
-	_dump_button_caps(preparsed, HidP_Output, caps.NumberOutputButtonCaps)
-	_dump_value_caps(preparsed, HidP_Output, caps.NumberOutputValueCaps)
+	_dump_button_caps(preparsed, HidP_Output, caps.NumberOutputButtonCaps, link_paths)
+	_dump_value_caps(preparsed, HidP_Output, caps.NumberOutputValueCaps, link_paths)
 
 	print(" Feature:")
-	_dump_button_caps(preparsed, HidP_Feature, caps.NumberFeatureButtonCaps, feature_report_ids)
-	_dump_value_caps(preparsed, HidP_Feature, caps.NumberFeatureValueCaps, feature_report_ids)
+	_dump_button_caps(preparsed, HidP_Feature, caps.NumberFeatureButtonCaps, link_paths, feature_report_ids)
+	_dump_value_caps(preparsed, HidP_Feature, caps.NumberFeatureValueCaps, link_paths, feature_report_ids)
 
 	input_report_ids.discard(0)
 	feature_report_ids.discard(0)
@@ -680,12 +711,78 @@ def _iter_usages_from_value_cap(vc: HIDP_VALUE_CAPS) -> list[int]:
 	return [int(vc.NotRange.Usage)]
 
 
+def _usage_component_name(usage_page: int, usage: int) -> str:
+	usage_name = _usage_name(usage_page, usage)
+	if usage_name:
+		return usage_name
+	usage_page_name = _usage_page_name(usage_page)
+	if usage_page_name:
+		return f"{usage_page_name}:0x{usage:04X}"
+	return f"0x{usage_page:04X}:0x{usage:04X}"
+
+
+def _get_link_collection_paths(preparsed: PHIDP_PREPARSED_DATA, caps: HIDP_CAPS) -> dict[int, str]:
+	count = int(caps.NumberLinkCollectionNodes)
+	if count <= 0:
+		return {}
+
+	arr = (HIDP_LINK_COLLECTION_NODE * count)()
+	length = wintypes.ULONG(count)
+	status = hid.HidP_GetLinkCollectionNodes(arr, ctypes.byref(length), preparsed)
+	if status != HIDP_STATUS_SUCCESS or length.value <= 0:
+		return {}
+
+	nodes = [arr[i] for i in range(int(length.value))]
+	paths: dict[int, str] = {}
+	max_index = len(nodes) - 1
+
+	for idx in range(len(nodes)):
+		parts: list[str] = []
+		cur = idx
+		seen: set[int] = set()
+		while 0 <= cur <= max_index and cur not in seen:
+			seen.add(cur)
+			node = nodes[cur]
+			up = int(node.LinkUsagePage)
+			u = int(node.LinkUsage)
+			if up or u:
+				parts.append(_usage_component_name(up, u))
+
+			parent = int(node.Parent)
+			if parent == cur:
+				break
+			if parent < 0 or parent > max_index:
+				break
+			if parent == 0 and cur == 0:
+				break
+			cur = parent
+
+		parts.reverse()
+		if parts:
+			paths[idx] = ".".join(parts)
+
+	return paths
+
+
+def _fmt_usage_with_link_path(usage_page: int, usage: int, link_collection: int, link_paths: dict[int, str] | None) -> str:
+	leaf = _usage_component_name(usage_page, usage)
+	if not link_paths:
+		return leaf
+	path = link_paths.get(int(link_collection))
+	if not path:
+		return leaf
+	if path.endswith(leaf):
+		return path
+	return f"{path}.{leaf}"
+
+
 def decode_report(
 	preparsed: PHIDP_PREPARSED_DATA,
 	report_type: int,
 	report: bytes,
 	value_caps: list[HIDP_VALUE_CAPS],
 	button_caps: list[HIDP_BUTTON_CAPS],
+	link_paths: dict[int, str] | None,
 	label: str,
 ) -> None:
 	if not report:
@@ -713,7 +810,8 @@ def decode_report(
 				len(report),
 			)
 			if status == HIDP_STATUS_SUCCESS:
-				print(f"  Value {_fmt_usage(usage_page, usage)} -> {int(out.value)}")
+				full_path = _fmt_usage_with_link_path(usage_page, usage, int(vc.LinkCollection), link_paths)
+				print(f"  Value {full_path} -> {int(out.value)}")
 
 	# Buttons (pressed usages per usage page)
 	usage_pages = sorted({int(bc.UsagePage) for bc in button_caps if int(bc.ReportID) == report_id})
@@ -752,8 +850,9 @@ def decode_input_report(
 	report: bytes,
 	value_caps: list[HIDP_VALUE_CAPS],
 	button_caps: list[HIDP_BUTTON_CAPS],
+	link_paths: dict[int, str] | None,
 ) -> None:
-	decode_report(preparsed, HidP_Input, report, value_caps, button_caps, label="Input")
+	decode_report(preparsed, HidP_Input, report, value_caps, button_caps, link_paths, label="Input")
 
 
 def decode_feature_report(
@@ -761,8 +860,9 @@ def decode_feature_report(
 	report: bytes,
 	value_caps: list[HIDP_VALUE_CAPS],
 	button_caps: list[HIDP_BUTTON_CAPS],
+	link_paths: dict[int, str] | None,
 ) -> None:
-	decode_report(preparsed, HidP_Feature, report, value_caps, button_caps, label="Feature")
+	decode_report(preparsed, HidP_Feature, report, value_caps, button_caps, link_paths, label="Feature")
 
 
 def read_interrupt_reports_sync(
@@ -942,13 +1042,14 @@ def main(argv: list[str]) -> int:
 		caps, preparsed = get_hid_caps(handle)
 		try:
 			input_report_ids, feature_report_ids = dump_report_mapping(preparsed, caps)
+			link_paths = _get_link_collection_paths(preparsed, caps)
 			input_value_caps = _get_value_caps(preparsed, HidP_Input, caps.NumberInputValueCaps)
 			input_button_caps = _get_button_caps(preparsed, HidP_Input, caps.NumberInputButtonCaps)
 			feature_value_caps = _get_value_caps(preparsed, HidP_Feature, caps.NumberFeatureValueCaps)
 			feature_button_caps = _get_button_caps(preparsed, HidP_Feature, caps.NumberFeatureButtonCaps)
 
 			def _decode_input(data: bytes) -> None:
-				decode_input_report(preparsed, data, input_value_caps, input_button_caps)
+				decode_input_report(preparsed, data, input_value_caps, input_button_caps, link_paths)
 
 			if not args.no_input:
 				print("\nReading interrupt input reports (ReadFile)...")
@@ -1003,7 +1104,7 @@ def main(argv: list[str]) -> int:
 							print(f"  Feature ReportID={rid}: failed ({e.strerror})")
 							continue
 						print(f"  Feature ReportID={rid}: {data.hex(' ')}")
-						decode_feature_report(preparsed, data, feature_value_caps, feature_button_caps)
+						decode_feature_report(preparsed, data, feature_value_caps, feature_button_caps, link_paths)
 		finally:
 			hid.HidD_FreePreparsedData(preparsed)
 	finally:
